@@ -144,6 +144,10 @@ protected:
     std::vector<size_t> m_mget_slot_cursor;                    // [slot] → per-thread round-robin cursor
     std::vector<std::vector<unsigned int> > m_mget_conn_slots; // [conn] → owned slot list
     std::vector<size_t> m_mget_conn_slot_cursor;               // [conn] → slot round-robin cursor
+    // Producers waiting for capacity on another connection. A routed MGET
+    // leaves no response on its producer to restart that producer's pipeline.
+    std::vector<std::vector<unsigned int> > m_mget_waiting_producers;
+    void wake_mget_producers(unsigned int conn_id);
     void build_mget_slot_cache();
 
     // Per-arbitrary-command-index routing counters (sized to the number of
@@ -264,6 +268,8 @@ public:
     virtual bool handle_cluster_slots(protocol_response *r);
     virtual void create_request(struct timeval timestamp, unsigned int conn_id);
     virtual bool hold_pipeline(unsigned int conn_id);
+    virtual void handle_rate_limit_refill(unsigned int conn_id);
+    virtual void handle_connection_disconnect(unsigned int conn_id);
     virtual void handle_response(unsigned int conn_id, struct timeval timestamp, request *request,
                                  protocol_response *response);
 };

@@ -1362,6 +1362,19 @@ void client_group::finalize_all_clients(void)
     }
 }
 
+// Connected (prepare()-d) clients that have not reached their stop condition
+// when the event loop returns. The missing end time establishes incomplete work,
+// not its cause. Clients a staircase ramp never connected are not counted.
+unsigned int client_group::count_unended_clients(void)
+{
+    unsigned int count = 0;
+    unsigned int active = active_client_count();
+    for (unsigned int i = 0; i < active && i < m_clients.size(); i++) {
+        if (!m_clients[i]->end_time_set()) count++;
+    }
+    return count;
+}
+
 void client_group::set_all_clients_interrupted(void)
 {
     // Iterate ALL clients for the same reason as finalize_all_clients.
