@@ -30,9 +30,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#ifdef HAVE_SYS_SOCKET_H
-#include <sys/socket.h>
-#endif
 #ifdef HAVE_NETINET_TCP_H
 #include <netinet/tcp.h>
 #endif
@@ -47,7 +44,7 @@
 #include <math.h>
 #include <algorithm>
 #include <sstream>
-#include <arpa/inet.h>
+#include "platform_compat.h"
 
 #include "client.h"
 #include "cluster_client.h"
