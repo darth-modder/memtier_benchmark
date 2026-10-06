@@ -24,8 +24,14 @@ AM_SILENT_RULES([yes])
 AC_CONFIG_MACRO_DIR([m4])
 # On MinGW, shared libtool libraries make libtool replace the program with a
 # wrapper exe that loses the exit status on Ctrl+C; default to static there.
+# Pre-seed enable_shared (which LT_INIT's --enable-shared handling honours)
+# instead of calling AC_DISABLE_SHARED: that macro needs libtool's m4 files
+# (an undefined AC_ macro is a hard autoconf error where libtool is not
+# installed) and expanding LT_INIT inside a case branch leaves libtool
+# uninitialised on every other host.
 AC_CANONICAL_HOST
-AS_CASE([$host_os], [mingw*], [AC_DISABLE_SHARED])
+AS_CASE([$host_os], [mingw*],
+  [AS_IF([test "${enable_shared+set}" != set], [enable_shared=no])])
 LT_INIT
 
 # Python is only required for the maintainer-only `make commands-meta` target.
