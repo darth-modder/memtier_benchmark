@@ -722,9 +722,33 @@ static bool is_unreplayable_monitor_command_type(const std::string &cmd_type_upp
     return cmd_type_upper == "HELLO";
 }
 
+#ifdef _WIN32
+// mingw-w64 does not provide POSIX getline(); minimal equivalent for load_from_file().
+static ssize_t getline(char **line, size_t *capacity, FILE *file)
+{
+    size_t length = 0;
+    int ch;
+    while ((ch = getc(file)) != EOF) {
+        if (length + 1 >= *capacity) {
+            size_t new_capacity = *capacity ? *capacity * 2 : 128;
+            if (new_capacity <= *capacity) return -1;
+            char *new_line = (char *) realloc(*line, new_capacity);
+            if (new_line == NULL) return -1;
+            *line = new_line;
+            *capacity = new_capacity;
+        }
+        (*line)[length++] = (char) ch;
+        if (ch == '\n') break;
+    }
+    if (length == 0) return -1;
+    (*line)[length] = '\0';
+    return (ssize_t) length;
+}
+#endif
+
 bool monitor_command_list::load_from_file(const char *filename)
 {
-    FILE *file = fopen(filename, "r");
+    FILE *file = fopen(filename, "rb");
     if (!file) {
         fprintf(stderr, "error: failed to open monitor input file: %s\n", filename);
         return false;
