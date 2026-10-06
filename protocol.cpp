@@ -366,20 +366,21 @@ int redis_protocol::authenticate(const char *credentials)
                                    "*2\r\n"
                                    "$4\r\n"
                                    "AUTH\r\n"
-                                   "$%zu\r\n"
+                                   "$%llu\r\n"
                                    "%s\r\n",
-                                   strlen(password), password);
+                                   (unsigned long long) strlen(password), password);
     } else {
         size_t user_len = password - user - 1;
         size = evbuffer_add_printf(m_write_buf,
                                    "*3\r\n"
                                    "$4\r\n"
                                    "AUTH\r\n"
-                                   "$%zu\r\n"
+                                   "$%llu\r\n"
                                    "%.*s\r\n"
-                                   "$%zu\r\n"
+                                   "$%llu\r\n"
                                    "%s\r\n",
-                                   user_len, (int) user_len, user, strlen(password), password);
+                                   (unsigned long long) user_len, (int) user_len, user,
+                                   (unsigned long long) strlen(password), password);
     }
     return size;
 }

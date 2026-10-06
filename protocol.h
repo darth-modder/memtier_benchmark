@@ -22,6 +22,7 @@
 #include <event2/buffer.h>
 #include <vector>
 #include <cstdint>
+#include "platform_compat.h"
 #include "memtier_benchmark.h"
 
 enum mbulk_element_type
