@@ -10,7 +10,7 @@ name: TSAN (ThreadSanitizer)
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, '2.*']
     paths-ignore:
       - '.github/workflows/ci.yml'
       - '.github/workflows/code-style.yml'
@@ -21,7 +21,7 @@ on:
       - 'docs/**'
       - '**.md'
   pull_request:
-    branches: [master, main]
+    branches: [master, main, '2.*']
     paths-ignore:
       - '.github/workflows/ci.yml'
       - '.github/workflows/code-style.yml'
