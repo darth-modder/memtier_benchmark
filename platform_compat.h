@@ -13,7 +13,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * along with memtier_benchmark.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef MEMTIER_PLATFORM_COMPAT_H
@@ -23,16 +23,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <afunix.h>
-#include <assert.h>
 typedef long suseconds_t;
 
-// mingw-w64's assert() expands to _assert(), which is not declared noreturn
-// (glibc's __assert_fail is). Without this, every "assert(0);" used as the
-// body of a value-returning function trips -Wreturn-type. Redeclare it with
-// the attribute; protocol.h includes this header so the redeclaration is in
-// effect before its inline bodies.
-extern "C" __declspec(dllimport) void __attribute__((__noreturn__, __cdecl__))
-_assert(const char *_Message, const char *_File, unsigned _Line);
 #else
 #include <sys/socket.h>
 #include <sys/un.h>

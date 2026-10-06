@@ -22,7 +22,6 @@
 #include <event2/buffer.h>
 #include <vector>
 #include <cstdint>
-#include "platform_compat.h"
 #include "memtier_benchmark.h"
 
 enum mbulk_element_type
@@ -87,7 +86,11 @@ public:
 
     virtual mbulk_size_el *as_mbulk_size() { return this; }
 
-    virtual bulk_el *as_bulk() { assert(0); }
+    virtual bulk_el *as_bulk()
+    {
+        assert(0);
+        return NULL;
+    }
 
     void add_new_element(mbulk_element *new_el)
     {
@@ -127,7 +130,11 @@ public:
 
     virtual bulk_el *as_bulk() { return this; }
 
-    virtual mbulk_size_el *as_mbulk_size() { assert(0); }
+    virtual mbulk_size_el *as_mbulk_size()
+    {
+        assert(0);
+        return NULL;
+    }
 
     char *value;
     unsigned int value_len;
