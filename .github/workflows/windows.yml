@@ -17,6 +17,7 @@ jobs:
   build-mingw-ucrt64:
     name: Build and smoke test (MSYS2 UCRT64)
     runs-on: windows-latest
+    timeout-minutes: 30
     defaults:
       run:
         shell: msys2 {0}
@@ -48,11 +49,11 @@ jobs:
       run: git config --global --add safe.directory '*'
 
     - name: Build
-      # --disable-shared: with shared libtool libraries enabled (the default)
-      # libtool builds a wrapper program on MinGW instead of the executable.
+      # Refresh the index first so that version.sh does not report a dirty tree.
       run: |
+        git update-index -q --refresh
         autoreconf -ivf
-        ./configure --disable-shared
+        ./configure
         make -j"$(nproc)" > build.log 2>&1 || { cat build.log; exit 1; }
         cat build.log
 

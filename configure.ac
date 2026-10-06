@@ -22,6 +22,10 @@ AC_CONFIG_HEADER([config.h])
 AM_INIT_AUTOMAKE
 AM_SILENT_RULES([yes])
 AC_CONFIG_MACRO_DIR([m4])
+# On MinGW, shared libtool libraries make libtool replace the program with a
+# wrapper exe that loses the exit status on Ctrl+C; default to static there.
+AC_CANONICAL_HOST
+AS_CASE([$host_os], [mingw*], [AC_DISABLE_SHARED])
 LT_INIT
 
 # Python is only required for the maintainer-only `make commands-meta` target.
