@@ -138,7 +138,7 @@ AS_IF([test "x$enable_fuzz" = "xyes"], [
 AM_CONDITIONAL([FUZZ_ENABLED], [test "x$enable_fuzz" = "xyes"])
 
 # clock_gettime requires -lrt on old glibc only.
-AC_SEARCH_LIBS([clock_gettime], [rt pthread], , AC_MSG_ERROR([rt is required libevent.]))
+AC_SEARCH_LIBS([clock_gettime], [rt], , AC_MSG_ERROR([rt is required libevent.]))
 
 
 AC_CHECK_LIB([z], [deflateInit_], , AC_MSG_ERROR([zlib is required; try installing zlib1g-dev.]))

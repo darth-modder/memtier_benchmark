@@ -109,8 +109,8 @@ inline unsigned long long int ts_diff_now(struct timeval a)
     struct timeval b;
 
     gettimeofday(&b, NULL);
-    unsigned long long aval = (unsigned long long) a.tv_sec * 1000000 + a.tv_usec;
-    unsigned long long bval = (unsigned long long) b.tv_sec * 1000000 + b.tv_usec;
+    long long aval = (long long) a.tv_sec * 1000000 + a.tv_usec;
+    long long bval = (long long) b.tv_sec * 1000000 + b.tv_usec;
 
     return bval - aval;
 }
@@ -1897,9 +1897,8 @@ void run_stats::print_json(json_handler *jsonhandler, arbitrary_command_list &co
     if (jsonhandler != NULL) { // Added for double verification in case someone accidently send NULL.
         jsonhandler->open_nesting("Runtime");
         const unsigned long long start_time_ms =
-            ((unsigned long long) m_start_time.tv_sec * 1000000 + m_start_time.tv_usec) / 1000;
-        const unsigned long long end_time_ms =
-            ((unsigned long long) m_end_time.tv_sec * 1000000 + m_end_time.tv_usec) / 1000;
+            ((long long) m_start_time.tv_sec * 1000000 + m_start_time.tv_usec) / 1000;
+        const unsigned long long end_time_ms = ((long long) m_end_time.tv_sec * 1000000 + m_end_time.tv_usec) / 1000;
         jsonhandler->write_obj("Start time", "%lld", start_time_ms);
         jsonhandler->write_obj("Finish time", "%lld", end_time_ms);
         jsonhandler->write_obj("Total duration", "%lld", end_time_ms - start_time_ms);
@@ -1910,7 +1909,7 @@ void run_stats::print_json(json_handler *jsonhandler, arbitrary_command_list &co
 
     // Whole-process CPU aggregate (memtier's own utilization). Emitted as a
     // sibling of "Runtime" so the existing Runtime schema is untouched. Only
-    // present when per-thread CPU accounting succeeded (Linux RUSAGE_THREAD).
+    // present when per-thread CPU accounting succeeded (Linux RUSAGE_THREAD, Windows GetThreadTimes).
     if (jsonhandler != NULL && m_cpu_summary.valid) {
         jsonhandler->open_nesting("CPU");
         jsonhandler->write_obj("cpu_user_seconds", "%.3f", m_cpu_summary.user_seconds);
@@ -2454,7 +2453,7 @@ void run_stats::print(FILE *out, benchmark_config *config, const char *header /*
 
     // CPU utilization summary for memtier itself. Goes to stderr (like the
     // miss-rate warning above) so it never corrupts piped / redirected table
-    // output. Only the authoritative getrusage-based aggregate is shown here.
+    // output. Only the authoritative per-thread-CPU-accounting aggregate is shown here.
     if (m_cpu_summary.valid) {
         fprintf(stderr,
                 "\n"

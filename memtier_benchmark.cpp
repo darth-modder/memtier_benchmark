@@ -4351,11 +4351,13 @@ int main(int argc, char *argv[])
     // are installed for every subsequent base.
 #ifdef _WIN32
     if (evthread_use_windows_threads() < 0) {
+        fprintf(stderr, "warning: evthread_use_windows_threads() failed; cross-thread loop wakeups may stall.\n");
+    }
 #else
     if (evthread_use_pthreads() < 0) {
-#endif
         fprintf(stderr, "warning: evthread_use_pthreads() failed; cross-thread loop wakeups may stall.\n");
     }
+#endif
 
     // Install signal handler for Ctrl+C
     signal(SIGINT, sigint_handler);

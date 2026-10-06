@@ -629,7 +629,7 @@ int shard_connection::get_local_port()
         return -1;
     }
 
-    int fd = bufferevent_getfd(m_bev);
+    evutil_socket_t fd = bufferevent_getfd(m_bev);
     if (fd < 0) {
         return -1;
     }
