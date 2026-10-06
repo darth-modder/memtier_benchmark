@@ -1909,7 +1909,7 @@ void run_stats::print_json(json_handler *jsonhandler, arbitrary_command_list &co
 
     // Whole-process CPU aggregate (memtier's own utilization). Emitted as a
     // sibling of "Runtime" so the existing Runtime schema is untouched. Only
-    // present when per-thread CPU accounting succeeded (Linux RUSAGE_THREAD).
+    // present when per-thread CPU accounting succeeded (Linux RUSAGE_THREAD, Windows GetThreadTimes).
     if (jsonhandler != NULL && m_cpu_summary.valid) {
         jsonhandler->open_nesting("CPU");
         jsonhandler->write_obj("cpu_user_seconds", "%.3f", m_cpu_summary.user_seconds);
@@ -2453,7 +2453,7 @@ void run_stats::print(FILE *out, benchmark_config *config, const char *header /*
 
     // CPU utilization summary for memtier itself. Goes to stderr (like the
     // miss-rate warning above) so it never corrupts piped / redirected table
-    // output. Only the authoritative getrusage-based aggregate is shown here.
+    // output. Only the authoritative per-thread-CPU-accounting aggregate is shown here.
     if (m_cpu_summary.valid) {
         fprintf(stderr,
                 "\n"
