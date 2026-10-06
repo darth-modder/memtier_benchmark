@@ -74,7 +74,10 @@ memtier_benchmark_LDADD = \
 	$(LIBSSL_LIBS)
 
 
-check_PROGRAMS = prometheus_metrics_test rate_limiter_test socket_options_test
+check_PROGRAMS = prometheus_metrics_test rate_limiter_test
+if !MEMTIER_WINDOWS
+check_PROGRAMS += socket_options_test
+endif
 
 # The metrics test links only the pure layer (prometheus_metrics.{h,cpp}).
 # First `make check` program in the repo. The metrics layer is config-free and
@@ -87,6 +90,10 @@ prometheus_metrics_test_SOURCES = tests/unit/prometheus_metrics_test.cpp \
     deps/hdr_histogram/hdr_histogram.c deps/hdr_histogram/hdr_histogram.h
 prometheus_metrics_test_CPPFLAGS = -I$(srcdir)
 prometheus_metrics_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+if MEMTIER_WINDOWS
+# mingw-w64 declares rand_r(), which this test uses, only under this feature macro.
+prometheus_metrics_test_CPPFLAGS += -D_POSIX_THREAD_SAFE_FUNCTIONS
+endif
 rate_limiter_test_SOURCES = tests/unit/rate_limiter_test.cpp rate_limiter.h
 rate_limiter_test_CPPFLAGS = -I$(srcdir)
 rate_limiter_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
