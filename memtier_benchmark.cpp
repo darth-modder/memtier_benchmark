@@ -191,10 +191,8 @@ static bool g_worker_failed = false;
 
 // Forward declarations
 struct cg_thread;
-#ifndef _WIN32
 static void print_client_list(FILE *fp, int pid, const char *timestr);
 static void print_all_threads_stack_trace(FILE *fp, int pid, const char *timestr);
-#endif
 
 // Global pointer to threads for crash handler access
 static std::vector<cg_thread *> *g_threads = NULL;
@@ -373,6 +371,80 @@ static void sigint_handler(int signum)
     g_interrupted = 1;
 }
 
+// Report tail shared by the POSIX signal handler and the Windows exception
+// filter: system and version information, the client list and the closing
+// banner.
+static void print_crash_report_tail(const char *timestr)
+{
+    // Print system information
+    fprintf(stderr, "\n[%d] %s # --- INFO OUTPUT\n", getpid(), timestr);
+
+#ifdef _WIN32
+    // RtlGetVersion, unlike GetVersionEx, is not subject to manifest-based
+    // version lying.
+    typedef LONG(WINAPI * rtl_get_version_fn)(PRTL_OSVERSIONINFOW);
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    rtl_get_version_fn rtl_get_version = ntdll ? (rtl_get_version_fn) GetProcAddress(ntdll, "RtlGetVersion") : NULL;
+    RTL_OSVERSIONINFOW os_version;
+    memset(&os_version, 0, sizeof(os_version));
+    os_version.dwOSVersionInfoSize = sizeof(os_version);
+    if (rtl_get_version != NULL && rtl_get_version(&os_version) == 0) {
+        fprintf(stderr, "[%d] %s # os:Windows %lu.%lu.%lu\n", getpid(), timestr, os_version.dwMajorVersion,
+                os_version.dwMinorVersion, os_version.dwBuildNumber);
+    }
+#else
+    struct utsname name;
+    if (uname(&name) == 0) {
+        fprintf(stderr, "[%d] %s # os:%s %s %s\n", getpid(), timestr, name.sysname, name.release, name.machine);
+    }
+#endif
+
+    fprintf(stderr, "[%d] %s # memtier_version:%s\n", getpid(), timestr, PACKAGE_VERSION);
+    fprintf(stderr, "[%d] %s # memtier_git_sha1:%s\n", getpid(), timestr, MEMTIER_GIT_SHA1);
+    fprintf(stderr, "[%d] %s # memtier_git_dirty:%s\n", getpid(), timestr, MEMTIER_GIT_DIRTY);
+
+#if defined(__x86_64__) || defined(_M_X64)
+    fprintf(stderr, "[%d] %s # arch_bits:64\n", getpid(), timestr);
+#elif defined(__i386__) || defined(_M_IX86)
+    fprintf(stderr, "[%d] %s # arch_bits:32\n", getpid(), timestr);
+#elif defined(__aarch64__)
+    fprintf(stderr, "[%d] %s # arch_bits:64\n", getpid(), timestr);
+#elif defined(__arm__)
+    fprintf(stderr, "[%d] %s # arch_bits:32\n", getpid(), timestr);
+#else
+    fprintf(stderr, "[%d] %s # arch_bits:unknown\n", getpid(), timestr);
+#endif
+
+#ifdef __GNUC__
+    fprintf(stderr, "[%d] %s # gcc_version:%d.%d.%d\n", getpid(), timestr, __GNUC__, __GNUC_MINOR__,
+            __GNUC_PATCHLEVEL__);
+#endif
+
+    fprintf(stderr, "[%d] %s # libevent_version:%s\n", getpid(), timestr, event_get_version());
+
+#ifdef USE_TLS
+    fprintf(stderr, "[%d] %s # openssl_version:%s\n", getpid(), timestr, OPENSSL_VERSION_TEXT);
+#endif
+
+    // Print client connection information
+    print_client_list(stderr, getpid(), timestr);
+
+#ifdef _WIN32
+    fprintf(stderr, "[%d] %s # For more information, please check the crash dump if available.\n", getpid(), timestr);
+    fprintf(stderr, "[%d] %s # To enable crash dumps, configure Windows Error Reporting LocalDumps:\n", getpid(),
+            timestr);
+    fprintf(stderr, "[%d] %s # HKLM\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\n", getpid(),
+            timestr);
+#else
+    fprintf(stderr, "[%d] %s # For more information, please check the core dump if available.\n", getpid(), timestr);
+    fprintf(stderr, "[%d] %s # To enable core dumps: ulimit -c unlimited\n", getpid(), timestr);
+    fprintf(stderr, "[%d] %s # Core pattern: /proc/sys/kernel/core_pattern\n", getpid(), timestr);
+#endif
+
+    fprintf(stderr, "\n=== MEMTIER_BENCHMARK BUG REPORT END. Make sure to include from START to END. ===\n\n");
+    fprintf(stderr, "       Please report this bug by opening an issue on github.com/redis/memtier_benchmark\n\n");
+}
+
 #ifndef _WIN32
 // Crash handler - prints stack trace and other debugging information
 static void crash_handler(int sig, siginfo_t *info, void *secret)
@@ -427,50 +499,7 @@ static void crash_handler(int sig, siginfo_t *info, void *secret)
     // Print stack trace for all threads
     print_all_threads_stack_trace(stderr, getpid(), timestr);
 
-    // Print system information
-    fprintf(stderr, "\n[%d] %s # --- INFO OUTPUT\n", getpid(), timestr);
-
-    struct utsname name;
-    if (uname(&name) == 0) {
-        fprintf(stderr, "[%d] %s # os:%s %s %s\n", getpid(), timestr, name.sysname, name.release, name.machine);
-    }
-
-    fprintf(stderr, "[%d] %s # memtier_version:%s\n", getpid(), timestr, PACKAGE_VERSION);
-    fprintf(stderr, "[%d] %s # memtier_git_sha1:%s\n", getpid(), timestr, MEMTIER_GIT_SHA1);
-    fprintf(stderr, "[%d] %s # memtier_git_dirty:%s\n", getpid(), timestr, MEMTIER_GIT_DIRTY);
-
-#if defined(__x86_64__) || defined(_M_X64)
-    fprintf(stderr, "[%d] %s # arch_bits:64\n", getpid(), timestr);
-#elif defined(__i386__) || defined(_M_IX86)
-    fprintf(stderr, "[%d] %s # arch_bits:32\n", getpid(), timestr);
-#elif defined(__aarch64__)
-    fprintf(stderr, "[%d] %s # arch_bits:64\n", getpid(), timestr);
-#elif defined(__arm__)
-    fprintf(stderr, "[%d] %s # arch_bits:32\n", getpid(), timestr);
-#else
-    fprintf(stderr, "[%d] %s # arch_bits:unknown\n", getpid(), timestr);
-#endif
-
-#ifdef __GNUC__
-    fprintf(stderr, "[%d] %s # gcc_version:%d.%d.%d\n", getpid(), timestr, __GNUC__, __GNUC_MINOR__,
-            __GNUC_PATCHLEVEL__);
-#endif
-
-    fprintf(stderr, "[%d] %s # libevent_version:%s\n", getpid(), timestr, event_get_version());
-
-#ifdef USE_TLS
-    fprintf(stderr, "[%d] %s # openssl_version:%s\n", getpid(), timestr, OPENSSL_VERSION_TEXT);
-#endif
-
-    // Print client connection information
-    print_client_list(stderr, getpid(), timestr);
-
-    fprintf(stderr, "[%d] %s # For more information, please check the core dump if available.\n", getpid(), timestr);
-    fprintf(stderr, "[%d] %s # To enable core dumps: ulimit -c unlimited\n", getpid(), timestr);
-    fprintf(stderr, "[%d] %s # Core pattern: /proc/sys/kernel/core_pattern\n", getpid(), timestr);
-
-    fprintf(stderr, "\n=== MEMTIER_BENCHMARK BUG REPORT END. Make sure to include from START to END. ===\n\n");
-    fprintf(stderr, "       Please report this bug by opening an issue on github.com/redis/memtier_benchmark\n\n");
+    print_crash_report_tail(timestr);
 
     // Remove the handler and re-raise the signal to generate core dump
     struct sigaction act;
@@ -542,7 +571,38 @@ static void setup_crash_handlers(void)
     sigaction(SIGALRM, &alarm_act, NULL);
 }
 #else
-static void setup_crash_handlers(void) {}
+// Best-effort crash report for unhandled SEH exceptions (access violation,
+// illegal instruction, ...). abort() and assert() failures do not reach it.
+static LONG WINAPI crash_exception_filter(EXCEPTION_POINTERS *info)
+{
+    // One report per process: a fault inside this filter, or a second
+    // crashing thread, must not re-enter it.
+    static volatile LONG reporting = 0;
+    if (InterlockedExchange(&reporting, 1) != 0) return EXCEPTION_CONTINUE_SEARCH;
+
+    char timestr[64];
+    time_t now = time(NULL);
+    strftime(timestr, sizeof(timestr), "%d %b %Y %H:%M:%S", localtime(&now));
+
+    const EXCEPTION_RECORD *rec = info->ExceptionRecord;
+    fprintf(stderr, "\n\n=== MEMTIER_BENCHMARK BUG REPORT START: Cut & paste starting from here ===\n");
+    fprintf(stderr, "[%d] %s # memtier_benchmark crashed by unhandled exception\n", getpid(), timestr);
+    fprintf(stderr, "[%d] %s # Crashed running exception <0x%08lx>\n", getpid(), timestr, rec->ExceptionCode);
+    fprintf(stderr, "[%d] %s # Fault address: %p\n", getpid(), timestr, rec->ExceptionAddress);
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+        fprintf(stderr, "[%d] %s # Access violation: %s address %p\n", getpid(), timestr,
+                rec->ExceptionInformation[0] == 0 ? "reading" : "writing", (void *) rec->ExceptionInformation[1]);
+    }
+
+    print_all_threads_stack_trace(stderr, getpid(), timestr);
+    print_crash_report_tail(timestr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void setup_crash_handlers(void)
+{
+    SetUnhandledExceptionFilter(crash_exception_filter);
+}
 #endif
 
 void benchmark_log_file_line(int level, const char *filename, unsigned int line, const char *fmt, ...)
@@ -3205,7 +3265,6 @@ void size_to_str(unsigned long long int size, char *buf, int buf_len)
 }
 
 // Print client list for crash handler
-#ifndef _WIN32
 static void print_client_list(FILE *fp, int pid, const char *timestr)
 {
     if (g_threads != NULL) {
@@ -3283,6 +3342,15 @@ static void print_all_threads_stack_trace(FILE *fp, int pid, const char *timestr
     if (trace_size > 1) {
         backtrace_symbols_fd(trace + 1, trace_size - 1, fileno(fp));
     }
+#elif defined(_WIN32)
+    // Raw return addresses only. Subtract the image base printed first to get
+    // an RVA, add the PE ImageBase and resolve with addr2line against the exe.
+    void *frames[62];
+    USHORT frame_count = CaptureStackBackTrace(0, 62, frames, NULL);
+    fprintf(fp, "[%d] %s #   image base: %p\n", pid, timestr, (void *) GetModuleHandleA(NULL));
+    for (USHORT i = 0; i < frame_count; i++) {
+        fprintf(fp, "[%d] %s #   %p\n", pid, timestr, frames[i]);
+    }
 #else
     fprintf(fp, "[%d] %s #   (backtrace not available on this platform)\n", pid, timestr);
 #endif
@@ -3306,7 +3374,6 @@ static void print_all_threads_stack_trace(FILE *fp, int pid, const char *timestr
         }
     }
 }
-#endif
 
 static void print_staircase_pattern(int run_id, benchmark_config *cfg)
 {
