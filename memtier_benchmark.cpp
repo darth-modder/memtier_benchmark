@@ -102,6 +102,45 @@ static bool bitmask_is_contiguous(unsigned int mask);
 #include <mach/mach.h>
 #endif
 
+#ifdef _WIN32
+// Windows has no getrusage(). Emulate the one call this file makes,
+// getrusage(RUSAGE_THREAD), with GetThreadTimes(). The values are scheduler
+// accounted, so they advance in clock ticks (~15.6 ms), not continuously.
+#define RUSAGE_THREAD 1
+
+struct rusage
+{
+    struct timeval ru_utime;
+    struct timeval ru_stime;
+};
+
+// FILETIME durations are in 100 ns units.
+static unsigned long long filetime_to_usec(const FILETIME &ft)
+{
+    return (((unsigned long long) ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10;
+}
+
+static int getrusage(int who, struct rusage *ru)
+{
+    if (who != RUSAGE_THREAD) {
+        errno = EINVAL;
+        return -1;
+    }
+    FILETIME creation_time, exit_time, kernel_time, user_time;
+    if (!GetThreadTimes(GetCurrentThread(), &creation_time, &exit_time, &kernel_time, &user_time)) {
+        errno = EINVAL;
+        return -1;
+    }
+    unsigned long long user_usec = filetime_to_usec(user_time);
+    unsigned long long kernel_usec = filetime_to_usec(kernel_time);
+    ru->ru_utime.tv_sec = (long) (user_usec / 1000000);
+    ru->ru_utime.tv_usec = (long) (user_usec % 1000000);
+    ru->ru_stime.tv_sec = (long) (kernel_usec / 1000000);
+    ru->ru_stime.tv_usec = (long) (kernel_usec % 1000000);
+    return 0;
+}
+#endif
+
 #include "client.h"
 #include "cluster_client.h"
 #include "JSON_handler.h"
@@ -2887,9 +2926,7 @@ struct cg_thread
     // same points as the CPU snapshots, so cores_used = cpu/wall divides two
     // values over the identical interval (no setup-vs-serving skew). Only read
     // post-join (race-free).
-#ifndef _WIN32
-    struct rusage m_cpu_start_ru; // CPU snapshot at the current segment's start
-#endif
+    struct rusage m_cpu_start_ru;   // CPU snapshot at the current segment's start
     struct timeval m_wall_start_tv; // wall snapshot at the same point
     unsigned long long m_cpu_user_usec_acc;
     unsigned long long m_cpu_sys_usec_acc;
@@ -2954,20 +2991,23 @@ struct cg_thread
 // Cumulative CPU time (user+system, microseconds) consumed by an arbitrary
 // thread, read WITHOUT perturbing that thread. Used by the live per-second
 // sampler in the monitor loop. On Linux this is pthread_getcpuclockid +
-// clock_gettime (a per-thread CPU clock); on macOS it is Mach thread_info.
+// clock_gettime (a per-thread CPU clock); on macOS it is Mach thread_info; on
+// Windows it is GetThreadTimes().
 // Returns 0 if the thread's CPU clock cannot be read (treated as no delta).
 static unsigned long long get_thread_cpu_usec(pthread_t thread)
 {
-#ifdef _WIN32
-    (void) thread;
-    return 0;
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     mach_port_t mt = pthread_mach_thread_np(thread);
     thread_basic_info_data_t info;
     mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
     if (thread_info(mt, THREAD_BASIC_INFO, (thread_info_t) &info, &count) != KERN_SUCCESS) return 0;
     return (unsigned long long) info.user_time.seconds * 1000000ULL + info.user_time.microseconds +
            (unsigned long long) info.system_time.seconds * 1000000ULL + info.system_time.microseconds;
+#elif defined(_WIN32)
+    FILETIME creation_time, exit_time, kernel_time, user_time;
+    if (!GetThreadTimes((HANDLE) pthread_gethandle(thread), &creation_time, &exit_time, &kernel_time, &user_time))
+        return 0;
+    return filetime_to_usec(kernel_time) + filetime_to_usec(user_time);
 #else
     clockid_t cid;
     if (pthread_getcpuclockid(thread, &cid) != 0) return 0;
@@ -2985,7 +3025,7 @@ static unsigned long long get_thread_cpu_usec(pthread_t thread)
 // interval.
 static void cg_thread_capture_cpu_end(cg_thread *thread)
 {
-#if defined(RUSAGE_THREAD) && !defined(_WIN32)
+#if defined(RUSAGE_THREAD)
     if (!thread->m_cpu_started) return;
     struct rusage end_ru;
     struct timeval end_tv;
@@ -3090,7 +3130,7 @@ static void *cg_thread_start(void *t)
 
     // Snapshot this worker's starting CPU time and wall time (per-thread) at
     // the same instant.
-#if defined(RUSAGE_THREAD) && !defined(_WIN32)
+#if defined(RUSAGE_THREAD)
     if (getrusage(RUSAGE_THREAD, &thread->m_cpu_start_ru) == 0) {
         gettimeofday(&thread->m_wall_start_tv, NULL);
         thread->m_cpu_started = true;
@@ -3537,7 +3577,7 @@ run_stats run_benchmark(int run_id, benchmark_config *cfg, object_generator *obj
 
     // Snapshot the main thread's CPU time just before launching workers, so the
     // whole-process CPU aggregate includes the orchestrator/sampler overhead.
-#if defined(RUSAGE_THREAD) && !defined(_WIN32)
+#if defined(RUSAGE_THREAD)
     struct rusage main_cpu_start_ru;
     bool main_cpu_valid = (getrusage(RUSAGE_THREAD, &main_cpu_start_ru) == 0);
 #endif
@@ -4048,7 +4088,7 @@ run_stats run_benchmark(int run_id, benchmark_config *cfg, object_generator *obj
 
         // Add the main thread's own CPU (orchestrator/sampler overhead) to the
         // whole-process totals, measured over the matching launch->here interval.
-#if defined(RUSAGE_THREAD) && !defined(_WIN32)
+#if defined(RUSAGE_THREAD)
         if (main_cpu_valid) {
             struct rusage main_end_ru;
             if (getrusage(RUSAGE_THREAD, &main_end_ru) == 0) {
