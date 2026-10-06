@@ -56,8 +56,7 @@
 #include <ctype.h>
 #include <sys/utsname.h>
 #include <dirent.h>
-#include <arpa/inet.h>  // inet_pton, ntohl/ntohs for prometheus-bind-addr parsing
-#include <netinet/in.h> // struct in_addr / in6_addr / IN6_IS_ADDR_LOOPBACK
+#include "platform_compat.h"
 #include <event2/event.h>
 #include <event2/thread.h>
 
@@ -4261,6 +4260,15 @@ static void cleanup_openssl(void)
 
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+    WSADATA winsock_data;
+    int wsa_error = WSAStartup(MAKEWORD(2, 2), &winsock_data);
+    if (wsa_error != 0) {
+        fprintf(stderr, "error: WSAStartup failed: %d\n", wsa_error);
+        return 1;
+    }
+    // Winsock remains initialized until process exit; process teardown releases it.
+#endif
     // Enable libevent's pthreads bindings so event_base_loopbreak() /
     // event_base_loopexit() called from the main thread reliably wake a
     // worker thread that is blocked in epoll_wait() with no live events.
@@ -4269,7 +4277,11 @@ int main(int argc, char *argv[])
     // --connection-stage-timeout abort (Phase 1 of #426) or a Ctrl+C.
     // Must run before any event_base is created so the locking callbacks
     // are installed for every subsequent base.
+#ifdef _WIN32
+    if (evthread_use_windows_threads() < 0) {
+#else
     if (evthread_use_pthreads() < 0) {
+#endif
         fprintf(stderr, "warning: evthread_use_pthreads() failed; cross-thread loop wakeups may stall.\n");
     }
 

@@ -43,6 +43,7 @@ memtier_benchmark_CPPFLAGS = \
 	$(LIBCRYPTO_CFLAGS) \
 	$(LIBSSL_CFLAGS)
 memtier_benchmark_SOURCES = \
+	platform_compat.h \
 	memtier_benchmark.cpp memtier_benchmark.h \
 	client.cpp client.h \
 	cluster_client.cpp cluster_client.h \
