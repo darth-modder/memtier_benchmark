@@ -34,6 +34,7 @@
 #endif
 
 #include "run_stats.h"
+#include "platform_compat.h"
 #include "prometheus_metrics.h" // prom::hdr_add_positive_delta (pure layer, always linked)
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -789,10 +790,12 @@ bool run_stats::save_hdr_log_format(struct hdr_histogram *hdr, char *filename, c
     if (hdr_total_count(hdr) > 0) {
         // Prepare output file
         FILE *hdr_outfile;
-        struct timespec start_timespec;
-        struct timespec end_timespec;
-        TIMEVAL_TO_TIMESPEC(&m_start_time, &start_timespec);
-        TIMEVAL_TO_TIMESPEC(&m_end_time, &end_timespec);
+        hdr_timespec start_timespec;
+        hdr_timespec end_timespec;
+        start_timespec.tv_sec = m_start_time.tv_sec;
+        start_timespec.tv_nsec = m_start_time.tv_usec * 1000;
+        end_timespec.tv_sec = m_end_time.tv_sec;
+        end_timespec.tv_nsec = m_end_time.tv_usec * 1000;
         hdr_outfile = fopen(filename, "w");
         if (!hdr_outfile) {
             perror(filename);
