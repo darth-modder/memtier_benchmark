@@ -45,19 +45,24 @@
 #include <assert.h>
 #include <errno.h>
 #include <sys/time.h>
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 #include <signal.h>
 #include <fcntl.h>
 #ifdef HAVE_EXECINFO_H
 #include <execinfo.h>
 #endif
+#ifndef _WIN32
 #include <ucontext.h>
+#endif
 #include <time.h>
 #include <ctype.h>
+#ifndef _WIN32
 #include <sys/utsname.h>
+#endif
 #include <dirent.h>
-#include <arpa/inet.h>  // inet_pton, ntohl/ntohs for prometheus-bind-addr parsing
-#include <netinet/in.h> // struct in_addr / in6_addr / IN6_IS_ADDR_LOOPBACK
+#include "platform_compat.h"
 #include <event2/event.h>
 #include <event2/thread.h>
 
@@ -147,8 +152,10 @@ static bool g_worker_failed = false;
 
 // Forward declarations
 struct cg_thread;
+#ifndef _WIN32
 static void print_client_list(FILE *fp, int pid, const char *timestr);
 static void print_all_threads_stack_trace(FILE *fp, int pid, const char *timestr);
+#endif
 
 // Global pointer to threads for crash handler access
 static std::vector<cg_thread *> *g_threads = NULL;
@@ -286,6 +293,7 @@ bool connection_stage_should_abort(unsigned int timeout_secs, std::string *out_l
 // allocating from the main heap. We also skip installation when something
 // upstream (e.g. ASan/LSan/UBSan's own runtime) has already registered an
 // alt stack for us; replacing theirs would break their crash reporting.
+#ifndef _WIN32
 #define MEMTIER_ALT_STACK_SIZE (64 * 1024)
 static __thread char tls_altstack_buf[MEMTIER_ALT_STACK_SIZE];
 static __thread bool tls_altstack_installed = false;
@@ -315,6 +323,9 @@ static void install_alt_signal_stack(void)
         tls_altstack_installed = true;
     }
 }
+#else
+static void install_alt_signal_stack(void) {}
+#endif
 
 // Signal handler for Ctrl+C
 static void sigint_handler(int signum)
@@ -323,6 +334,7 @@ static void sigint_handler(int signum)
     g_interrupted = 1;
 }
 
+#ifndef _WIN32
 // Crash handler - prints stack trace and other debugging information
 static void crash_handler(int sig, siginfo_t *info, void *secret)
 {
@@ -490,6 +502,9 @@ static void setup_crash_handlers(void)
     alarm_act.sa_handler = SIG_DFL;
     sigaction(SIGALRM, &alarm_act, NULL);
 }
+#else
+static void setup_crash_handlers(void) {}
+#endif
 
 void benchmark_log_file_line(int level, const char *filename, unsigned int line, const char *fmt, ...)
 {
@@ -1386,8 +1401,13 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
             cfg->server = optarg;
             break;
         case 'S':
+#ifdef _WIN32
+            fprintf(stderr, "error: --unix-socket is not supported on Windows.\n");
+            return -1;
+#else
             cfg->unix_socket = optarg;
             break;
+#endif
         case 'p':
             endptr = NULL;
             cfg->port = (unsigned short) strtoul(optarg, &endptr, 10);
@@ -1480,8 +1500,12 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
             cfg->distinct_client_seed++;
             break;
         case o_randomize:
+#ifdef _WIN32
+            cfg->randomize = (int) (generate_random_seed() & 0x7fffffff);
+#else
             srandom(generate_random_seed());
             cfg->randomize = random();
+#endif
             break;
         case 'n':
             endptr = NULL;
@@ -2842,7 +2866,9 @@ struct cg_thread
     // same points as the CPU snapshots, so cores_used = cpu/wall divides two
     // values over the identical interval (no setup-vs-serving skew). Only read
     // post-join (race-free).
-    struct rusage m_cpu_start_ru;   // CPU snapshot at the current segment's start
+#ifndef _WIN32
+    struct rusage m_cpu_start_ru; // CPU snapshot at the current segment's start
+#endif
     struct timeval m_wall_start_tv; // wall snapshot at the same point
     unsigned long long m_cpu_user_usec_acc;
     unsigned long long m_cpu_sys_usec_acc;
@@ -2911,7 +2937,10 @@ struct cg_thread
 // Returns 0 if the thread's CPU clock cannot be read (treated as no delta).
 static unsigned long long get_thread_cpu_usec(pthread_t thread)
 {
-#ifdef __APPLE__
+#ifdef _WIN32
+    (void) thread;
+    return 0;
+#elif defined(__APPLE__)
     mach_port_t mt = pthread_mach_thread_np(thread);
     thread_basic_info_data_t info;
     mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
@@ -2935,7 +2964,7 @@ static unsigned long long get_thread_cpu_usec(pthread_t thread)
 // interval.
 static void cg_thread_capture_cpu_end(cg_thread *thread)
 {
-#if defined(RUSAGE_THREAD)
+#if defined(RUSAGE_THREAD) && !defined(_WIN32)
     if (!thread->m_cpu_started) return;
     struct rusage end_ru;
     struct timeval end_tv;
@@ -3040,7 +3069,7 @@ static void *cg_thread_start(void *t)
 
     // Snapshot this worker's starting CPU time and wall time (per-thread) at
     // the same instant.
-#if defined(RUSAGE_THREAD)
+#if defined(RUSAGE_THREAD) && !defined(_WIN32)
     if (getrusage(RUSAGE_THREAD, &thread->m_cpu_start_ru) == 0) {
         gettimeofday(&thread->m_wall_start_tv, NULL);
         thread->m_cpu_started = true;
@@ -3136,6 +3165,7 @@ void size_to_str(unsigned long long int size, char *buf, int buf_len)
 }
 
 // Print client list for crash handler
+#ifndef _WIN32
 static void print_client_list(FILE *fp, int pid, const char *timestr)
 {
     if (g_threads != NULL) {
@@ -3236,6 +3266,7 @@ static void print_all_threads_stack_trace(FILE *fp, int pid, const char *timestr
         }
     }
 }
+#endif
 
 static void print_staircase_pattern(int run_id, benchmark_config *cfg)
 {
@@ -3485,7 +3516,7 @@ run_stats run_benchmark(int run_id, benchmark_config *cfg, object_generator *obj
 
     // Snapshot the main thread's CPU time just before launching workers, so the
     // whole-process CPU aggregate includes the orchestrator/sampler overhead.
-#if defined(RUSAGE_THREAD)
+#if defined(RUSAGE_THREAD) && !defined(_WIN32)
     struct rusage main_cpu_start_ru;
     bool main_cpu_valid = (getrusage(RUSAGE_THREAD, &main_cpu_start_ru) == 0);
 #endif
@@ -3996,7 +4027,7 @@ run_stats run_benchmark(int run_id, benchmark_config *cfg, object_generator *obj
 
         // Add the main thread's own CPU (orchestrator/sampler overhead) to the
         // whole-process totals, measured over the matching launch->here interval.
-#if defined(RUSAGE_THREAD)
+#if defined(RUSAGE_THREAD) && !defined(_WIN32)
         if (main_cpu_valid) {
             struct rusage main_end_ru;
             if (getrusage(RUSAGE_THREAD, &main_end_ru) == 0) {
@@ -4240,6 +4271,15 @@ static void cleanup_openssl(void)
 
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+    WSADATA winsock_data;
+    int wsa_error = WSAStartup(MAKEWORD(2, 2), &winsock_data);
+    if (wsa_error != 0) {
+        fprintf(stderr, "error: WSAStartup failed: %d\n", wsa_error);
+        return 1;
+    }
+    // Winsock remains initialized until process exit; process teardown releases it.
+#endif
     // Enable libevent's pthreads bindings so event_base_loopbreak() /
     // event_base_loopexit() called from the main thread reliably wake a
     // worker thread that is blocked in epoll_wait() with no live events.
@@ -4248,9 +4288,15 @@ int main(int argc, char *argv[])
     // --connection-stage-timeout abort (Phase 1 of #426) or a Ctrl+C.
     // Must run before any event_base is created so the locking callbacks
     // are installed for every subsequent base.
+#ifdef _WIN32
+    if (evthread_use_windows_threads() < 0) {
+        fprintf(stderr, "warning: evthread_use_windows_threads() failed; cross-thread loop wakeups may stall.\n");
+    }
+#else
     if (evthread_use_pthreads() < 0) {
         fprintf(stderr, "warning: evthread_use_pthreads() failed; cross-thread loop wakeups may stall.\n");
     }
+#endif
 
     // Install signal handler for Ctrl+C
     signal(SIGINT, sigint_handler);
@@ -4263,12 +4309,15 @@ int main(int argc, char *argv[])
     // on plain-TCP send(), but TLS writes via OpenSSL's SSL_write() do not
     // (and ARM Linux ignores MSG_NOSIGNAL on writev in some configurations),
     // so a process-wide SIG_IGN is the robust fix. See PERF-501 / GH #382.
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     // Install crash handlers for debugging
     setup_crash_handlers();
 
     // Enable core dumps
+#ifndef _WIN32
     struct rlimit core_limit;
     core_limit.rlim_cur = RLIM_INFINITY;
     core_limit.rlim_max = RLIM_INFINITY;
@@ -4276,6 +4325,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "warning: failed to set core dump limit: %s\n", strerror(errno));
         fprintf(stderr, "warning: core dumps may not be generated on crash\n");
     }
+#endif
 
     // Keep URI storage alive for cfg and its workers; neither string changes after parsing.
     std::string uri_authenticate;
@@ -4844,11 +4894,13 @@ int main(int argc, char *argv[])
         config_print_to_json(jsonhandler, &cfg);
     }
 
+#ifndef _WIN32
     struct rlimit rlim;
     if (getrlimit(RLIMIT_NOFILE, &rlim) != 0) {
         benchmark_error_log("error: getrlimit failed: %s\n", strerror(errno));
         exit(1);
     }
+#endif
 
     if (cfg.unix_socket != NULL && (cfg.server != NULL || cfg.port > 0)) {
         benchmark_error_log("error: UNIX domain socket and TCP cannot be used together.\n");
@@ -4864,6 +4916,7 @@ int main(int argc, char *argv[])
         }
     }
 
+#ifndef _WIN32
     unsigned int fds_needed = (cfg.threads * cfg.clients) + (cfg.threads * 10) + 10;
     if (fds_needed > rlim.rlim_cur) {
         if (fds_needed > rlim.rlim_max && getuid() != 0) {
@@ -4877,6 +4930,7 @@ int main(int argc, char *argv[])
             exit(1);
         }
     }
+#endif
 
     // create and configure object generator
     object_generator *obj_gen = NULL;
