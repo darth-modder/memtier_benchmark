@@ -44,15 +44,18 @@ config_range::config_range(const char *range_str) : min(0), max(0)
 {
     assert(range_str != NULL);
 
+    // Parse at 64 bits: 'unsigned long' is only 32 bits on LLP64 hosts
+    // (Windows), where strtoul() would saturate wide values instead of
+    // narrowing them the way LP64 hosts do.
     char *p = NULL;
-    min = strtoul(range_str, &p, 10);
+    min = (int) strtoull(range_str, &p, 10);
     if (!p || *p != '-') {
         min = max = 0;
         return;
     }
 
     char *q = NULL;
-    max = strtoul(p + 1, &q, 10);
+    max = (int) strtoull(p + 1, &q, 10);
     if (!q || *q != '\0') {
         min = max = 0;
         return;
