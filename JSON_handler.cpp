@@ -63,6 +63,31 @@ json_handler::~json_handler()
 }
 
 /**
+ * Write str to fp as the body of a JSON string: escape '"', '\' and control
+ * characters. Paths on Windows (e.g. --out-file C:\dir\f.txt) contain
+ * backslashes that would otherwise make the document invalid JSON.
+ */
+static void write_json_string_body(FILE *fp, const char *str)
+{
+    for (const unsigned char *p = (const unsigned char *) str; *p; p++) {
+        switch (*p) {
+        case '"':
+            fputs("\\\"", fp);
+            break;
+        case '\\':
+            fputs("\\\\", fp);
+            break;
+        default:
+            if (*p < 0x20) {
+                fprintf(fp, "\\u%04x", *p);
+            } else {
+                fputc(*p, fp);
+            }
+        }
+    }
+}
+
+/**
  * Write singel object named objectname to the JSON with values stated in ...
  * based on the format defined
  * basically uses fprintf with the same parameters.
@@ -83,6 +108,11 @@ void json_handler::write_obj(const char *objectname, const char *format, ...)
         if (str_arg == nullptr) {
             // Handle NULL strings by writing "null" to the JSON file
             fprintf(m_json_file, "null");
+        } else if (strcmp(format, "\"%s\"") == 0) {
+            // A quoted string value: escape it so the output stays valid JSON
+            fputc('"', m_json_file);
+            write_json_string_body(m_json_file, str_arg);
+            fputc('"', m_json_file);
         } else {
             // Print the valid string argument
             vfprintf(m_json_file, format, argptr);
