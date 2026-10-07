@@ -432,6 +432,34 @@ evutil_socket_t shard_connection::setup_socket(struct connect_info *addr)
     return sockfd;
 }
 
+#ifdef _WIN32
+// bufferevent_socket_connect() with an address calls connect() and, on the
+// expected WSAEWOULDBLOCK, getsockopt(SO_ERROR) to look for an immediate error.
+// While a connect is in flight that getsockopt() blocks for 10-15 ms (even on
+// loopback), and since all connections are opened one after another before the
+// benchmark starts, setup time grows with threads * clients. Issue the
+// non-blocking connect() here and give libevent the in-flight socket (NULL
+// address), which then waits for the socket to become writable exactly as it
+// does after its own WSAEWOULDBLOCK; failures are reported through the event
+// callback as before. If connect() fails immediately, let libevent retry it so
+// the error is handled the same way as before.
+static int bufferevent_connect_nonblocking(struct bufferevent *bev, evutil_socket_t sockfd, const struct sockaddr *sa,
+                                           int socklen)
+{
+    if (::connect(sockfd, sa, socklen) == 0) {
+        return bufferevent_socket_connect(bev, NULL, 0);
+    }
+
+    // The errors libevent treats as "connect in progress" on Windows.
+    int err = WSAGetLastError();
+    if (err == WSAEWOULDBLOCK || err == WSAEINTR || err == WSAEINPROGRESS || err == WSAEINVAL) {
+        return bufferevent_socket_connect(bev, NULL, 0);
+    }
+
+    return bufferevent_socket_connect(bev, sa, socklen);
+}
+#endif
+
 int shard_connection::connect(struct connect_info *addr)
 {
     // Belt-and-suspenders: disconnect() already calls reset_state(), but if
@@ -470,8 +498,14 @@ int shard_connection::connect(struct connect_info *addr)
     // call connect
     m_connection_state = conn_in_progress;
 
-    if (bufferevent_socket_connect(m_bev, m_unix_sockaddr ? (struct sockaddr *) m_unix_sockaddr : addr->ci_addr,
-                                   m_unix_sockaddr ? sizeof(struct sockaddr_un) : addr->ci_addrlen) == -1) {
+    const struct sockaddr *sa = m_unix_sockaddr ? (struct sockaddr *) m_unix_sockaddr : addr->ci_addr;
+    int socklen = m_unix_sockaddr ? sizeof(struct sockaddr_un) : addr->ci_addrlen;
+#ifdef _WIN32
+    int ret = bufferevent_connect_nonblocking(m_bev, sockfd, sa, socklen);
+#else
+    int ret = bufferevent_socket_connect(m_bev, sa, socklen);
+#endif
+    if (ret == -1) {
         disconnect();
 
         benchmark_error_log("connect failed, error = %s\n", evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
