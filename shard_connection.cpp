@@ -441,8 +441,10 @@ evutil_socket_t shard_connection::setup_socket(struct connect_info *addr)
 // non-blocking connect() here and give libevent the in-flight socket (NULL
 // address), which then waits for the socket to become writable exactly as it
 // does after its own WSAEWOULDBLOCK; failures are reported through the event
-// callback as before. If connect() fails immediately, let libevent retry it so
-// the error is handled the same way as before.
+// callback as before. If connect() fails immediately with anything else, return
+// -1 without calling connect() a second time (as bufferevent_socket_connect()
+// with an address would); the caller reports the Winsock error, which is left
+// in place for it to read.
 static int bufferevent_connect_nonblocking(struct bufferevent *bev, evutil_socket_t sockfd, const struct sockaddr *sa,
                                            int socklen)
 {
@@ -456,7 +458,7 @@ static int bufferevent_connect_nonblocking(struct bufferevent *bev, evutil_socke
         return bufferevent_socket_connect(bev, NULL, 0);
     }
 
-    return bufferevent_socket_connect(bev, sa, socklen);
+    return -1;
 }
 #endif
 
@@ -506,9 +508,11 @@ int shard_connection::connect(struct connect_info *addr)
     int ret = bufferevent_socket_connect(m_bev, sa, socklen);
 #endif
     if (ret == -1) {
+        // Read the error before disconnect() can overwrite it.
+        int err = EVUTIL_SOCKET_ERROR();
         disconnect();
 
-        benchmark_error_log("connect failed, error = %s\n", evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+        benchmark_error_log("connect failed, error = %s\n", evutil_socket_error_to_string(err));
         return -1;
     }
 
