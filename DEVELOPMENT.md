@@ -100,8 +100,12 @@ $ make LDFLAGS=-all-static \
 
 `tests/windows_smoke.py` runs a few end-to-end checks against a built
 executable without needing a Redis server (`python tests/windows_smoke.py
-./memtier_benchmark.exe`). The RLTest integration suite has not been run on
-Windows.
+./memtier_benchmark.exe`). The RLTest integration suite is not run in CI on
+Windows. It can be run locally against a Windows Redis-compatible server such
+as Memurai, but RLTest needs a small local shim for that (a stand-in for
+`fcntl`, the POSIX signal names the tests reference, and the hard-coded `/tmp`
+paths). Some tests need POSIX signals or `/proc` (the crash-handler and
+SIGPIPE tests) and cannot pass on Windows.
 
 Limitations of the Windows build:
 
