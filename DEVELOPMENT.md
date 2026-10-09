@@ -103,9 +103,10 @@ executable without needing a Redis server (`python tests/windows_smoke.py
 ./memtier_benchmark.exe`). The RLTest integration suite is not run in CI on
 Windows. It can be run locally against a Windows Redis-compatible server such
 as Memurai, but RLTest needs a small local shim for that (a stand-in for
-`fcntl`, the POSIX signal names the tests reference, and the hard-coded `/tmp`
-paths). Some tests need POSIX signals or `/proc` (the crash-handler and
-SIGPIPE tests) and cannot pass on Windows.
+`fcntl`, the POSIX signal names the tests reference, the hard-coded `/tmp`
+paths and, for Memurai, its `--version` output format). Some tests need POSIX
+signals or `/proc` (the crash-handler, SIGINT and SIGPIPE-immunity tests) and
+cannot pass on Windows.
 
 Limitations of the Windows build:
 
