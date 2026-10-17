@@ -575,11 +575,12 @@ static const char *interrupt_source(void)
     return g_interrupted == SIGTERM ? "SIGTERM" : "user (Ctrl+C)";
 }
 
-#ifndef _WIN32
 // Offset of local time from UTC, in seconds, taken once at startup by
-// prewarm_crash_handler() with crash_utc_offset(). The crash handler cannot
+// crash-handler setup with crash_utc_offset(). The crash handlers cannot
 // call localtime(); see crash_report.h (#681).
 static long g_crash_utc_offset = 0;
+
+#ifndef _WIN32
 
 // Begin a report line: "[pid] timestr # ".
 static void crash_line_prefix(crash_line &l, int pid, const char *timestr)
@@ -806,8 +807,7 @@ static LONG WINAPI crash_exception_filter(EXCEPTION_POINTERS *info)
     if (InterlockedExchange(&reporting, 1) != 0) return EXCEPTION_CONTINUE_SEARCH;
 
     char timestr[64];
-    time_t now = time(NULL);
-    strftime(timestr, sizeof(timestr), "%d %b %Y %H:%M:%S", localtime(&now));
+    crash_format_time(timestr, sizeof(timestr), (long long) time(NULL), g_crash_utc_offset);
 
     const EXCEPTION_RECORD *rec = info->ExceptionRecord;
     fprintf(stderr, "\n\n=== MEMTIER_BENCHMARK BUG REPORT START: Cut & paste starting from here ===\n");
@@ -826,6 +826,7 @@ static LONG WINAPI crash_exception_filter(EXCEPTION_POINTERS *info)
 
 static void setup_crash_handlers(void)
 {
+    g_crash_utc_offset = crash_utc_offset(time(NULL));
     SetUnhandledExceptionFilter(crash_exception_filter);
 }
 #endif
@@ -3168,7 +3169,8 @@ void usage()
         "  -h, --host=ADDR                Server address (default: localhost)\n"
         "  -s, --server=ADDR              Same as --host\n"
         "  -p, --port=PORT                Server port (default: 6379)\n"
-        "  -S, --unix-socket=SOCKET       UNIX Domain socket name (default: none)\n"
+        "  -S, --unix-socket=SOCKET       UNIX Domain socket name, POSIX only (default: none)\n"
+        "                                Linux: @NAME selects an abstract socket\n"
         "  -4, --ipv4                     Force IPv4 address resolution.\n"
         "  -6  --ipv6                     Force IPv6 address resolution.\n"
         "  -P, --protocol=PROTOCOL        Protocol to use (default: redis).\n"
