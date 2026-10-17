@@ -257,9 +257,8 @@ public:
     // drain flags, current mbulk tree) and clear m_last_response so
     // its mbulk children are freed.
     // The default implementation only clears m_last_response; redis_protocol
-    // overrides to also reset its parser fields. memcache subclasses keep
-    // the default for now (their state machine resets at every reply boundary
-    // and they have no RESP3-style push frame drain to leak).
+    // and memcache_meta_protocol override to also reset their parser fields.
+    // The legacy memcache text and binary implementations retain the default.
     // m_resp3 (negotiated protocol version) is intentionally NOT touched -- a
     // TCP flap should not roll back the HELLO 3 negotiation result.
     virtual void reset_state();
@@ -276,6 +275,9 @@ public:
     virtual int write_command_get(const char *key, int key_len, unsigned int offset) = 0;
     virtual int write_command_multi_get(const keylist *keylist) = 0;
     virtual int write_command_wait(unsigned int num_slaves, unsigned int timeout) = 0;
+    // Raw retries bypass the command writers. Protocols that keep reply
+    // expectations must restore them in the same order as the resent bytes.
+    virtual void prepare_request_replay(bool is_get, unsigned int keys) {}
     virtual int parse_response() = 0;
 
     // handle arbitrary command
