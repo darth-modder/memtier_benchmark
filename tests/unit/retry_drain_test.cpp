@@ -73,8 +73,19 @@ static request *retry_request(const char *command, unsigned int retries)
 // A retry whose drain timer fired while its connection could not send stays
 // queued. A later retry with a longer backoff must not push it back: it goes
 // out once the connection is set up, not after the later retry's backoff.
-static void test_overdue_retry_sent_after_connect()
+static void test_overdue_retry_sent_after_connect(const char *path)
 {
+#ifndef _WIN32
+    evutil_socket_t listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    sockaddr_un address = {};
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+    check(listener >= 0 && bind(listener, (sockaddr *) &address, sizeof(address)) == 0 && listen(listener, 4) == 0,
+          "listener");
+
+    connect_info endpoint = {};
+
+#else
     evutil_socket_t listener = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in address = {};
     address.sin_family = AF_INET;
@@ -90,6 +101,7 @@ static void test_overdue_retry_sent_after_connect()
     endpoint.ci_addr = (sockaddr *) &address;
     endpoint.ci_addrlen = address_len;
 
+#endif
     arbitrary_command_list commands;
     benchmark_config config = {};
     config.arbitrary_commands = &commands;
@@ -98,6 +110,7 @@ static void test_overdue_retry_sent_after_connect()
     // A zero-depth pipeline sends no requests of its own.
     config.pipeline = 0;
     config.protocol = PROTOCOL_REDIS_DEFAULT;
+    config.unix_socket = path;
     config.retry_on_error = true;
     config.max_retries = 5;
     config.retry_backoff_ms = 20;
@@ -144,6 +157,9 @@ static void test_overdue_retry_sent_after_connect()
     delete protocol;
     event_base_free(base);
     evutil_closesocket(listener);
+#ifndef _WIN32
+    unlink(path);
+#endif
 }
 
 int main()
@@ -151,8 +167,17 @@ int main()
 #ifdef _WIN32
     WSADATA data;
     check(WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock startup");
+    test_overdue_retry_sent_after_connect(NULL);
+#else
+    char directory[] = "/tmp/memtier-retry-drain-XXXXXX";
+    if (mkdtemp(directory) == NULL) {
+        perror("mkdtemp");
+        return 1;
+    }
+    std::string path = std::string(directory) + "/socket";
+    test_overdue_retry_sent_after_connect(path.c_str());
+    rmdir(directory);
 #endif
-    test_overdue_retry_sent_after_connect();
     if (failures != 0) {
         fprintf(stderr, "%d retry drain check(s) failed\n", failures);
         return 1;

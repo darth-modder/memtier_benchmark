@@ -199,7 +199,13 @@ static void test_tcp(int family)
 {
     const char *label = family == AF_INET ? "IPv4" : "IPv6";
     evutil_socket_t listener = socket(family, SOCK_STREAM, IPPROTO_TCP);
-    if (listener < 0 && family == AF_INET6 && (errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT)) {
+    int socket_error = EVUTIL_SOCKET_ERROR();
+#ifdef _WIN32
+    bool unsupported = socket_error == WSAEAFNOSUPPORT || socket_error == WSAEPROTONOSUPPORT;
+#else
+    bool unsupported = socket_error == EAFNOSUPPORT || socket_error == EPROTONOSUPPORT;
+#endif
+    if (listener < 0 && family == AF_INET6 && unsupported) {
         printf("SKIP IPv6: address family is unavailable\n");
         return;
     }
@@ -218,7 +224,13 @@ static void test_tcp(int family)
         len = sizeof(*address);
     }
     int result = bind(listener, reinterpret_cast<sockaddr *>(&storage), len);
-    if (result < 0 && family == AF_INET6 && errno == EADDRNOTAVAIL) {
+    socket_error = EVUTIL_SOCKET_ERROR();
+#ifdef _WIN32
+    bool no_address = socket_error == WSAEADDRNOTAVAIL;
+#else
+    bool no_address = socket_error == EADDRNOTAVAIL;
+#endif
+    if (result < 0 && family == AF_INET6 && no_address) {
         printf("SKIP IPv6: loopback is unavailable\n");
         evutil_closesocket(listener);
         return;

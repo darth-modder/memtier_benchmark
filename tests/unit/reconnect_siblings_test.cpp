@@ -92,8 +92,19 @@ public:
 // A sibling that is connecting (or connected) and holds requests for replay
 // will resend them (--retry-on-error): it keeps the client going. Once it is
 // disconnected with nothing pending, it will never resend them.
-static void test_sibling_with_replay()
+static void test_sibling_with_replay(const char *path)
 {
+#ifndef _WIN32
+    evutil_socket_t listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    sockaddr_un address = {};
+    address.sun_family = AF_UNIX;
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+    check(listener >= 0 && bind(listener, (sockaddr *) &address, sizeof(address)) == 0 && listen(listener, 4) == 0,
+          "unix listener");
+
+    connect_info endpoint = {};
+
+#else
     evutil_socket_t listener = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in address = {};
     address.sin_family = AF_INET;
@@ -109,6 +120,7 @@ static void test_sibling_with_replay()
     endpoint.ci_addr = (sockaddr *) &address;
     endpoint.ci_addrlen = address_len;
 
+#endif
     arbitrary_command_list commands;
     benchmark_config config = {};
     config.arbitrary_commands = &commands;
@@ -116,6 +128,7 @@ static void test_sibling_with_replay()
     config.key_pattern = "S:S";
     config.pipeline = 0;
     config.protocol = PROTOCOL_REDIS_DEFAULT;
+    config.unix_socket = path;
     config.test_time = 10;
     config.reconnect_on_error = true;
     config.retry_on_error = true;
@@ -147,6 +160,9 @@ static void test_sibling_with_replay()
     delete protocol;
     event_base_free(base);
     evutil_closesocket(listener);
+#ifndef _WIN32
+    unlink(path);
+#endif
 }
 
 int main()
@@ -154,8 +170,17 @@ int main()
 #ifdef _WIN32
     WSADATA data;
     check(WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock startup");
+    test_sibling_with_replay(NULL);
+#else
+    char directory[] = "/tmp/memtier-reconnect-siblings-XXXXXX";
+    if (mkdtemp(directory) == NULL) {
+        perror("mkdtemp");
+        return 1;
+    }
+    std::string path = std::string(directory) + "/socket";
+    test_sibling_with_replay(path.c_str());
+    rmdir(directory);
 #endif
-    test_sibling_with_replay();
 
     arbitrary_command_list commands;
     benchmark_config config = {};
