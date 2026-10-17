@@ -32,7 +32,6 @@ jobs:
         install: >-
           autoconf-wrapper
           automake-wrapper
-          libtool
           make
           git
         pacboy: >-

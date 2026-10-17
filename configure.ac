@@ -22,17 +22,7 @@ AC_CONFIG_HEADER([config.h])
 AM_INIT_AUTOMAKE
 AM_SILENT_RULES([yes])
 AC_CONFIG_MACRO_DIR([m4])
-# On MinGW, shared libtool libraries make libtool replace the program with a
-# wrapper exe that loses the exit status on Ctrl+C; default to static there.
-# Pre-seed enable_shared (which LT_INIT's --enable-shared handling honours)
-# instead of calling AC_DISABLE_SHARED: that macro needs libtool's m4 files
-# (an undefined AC_ macro is a hard autoconf error where libtool is not
-# installed) and expanding LT_INIT inside a case branch leaves libtool
-# uninitialised on every other host.
 AC_CANONICAL_HOST
-AS_CASE([$host_os], [mingw*],
-  [AS_IF([test "${enable_shared+set}" != set], [enable_shared=no])])
-LT_INIT
 
 # Python is only required for the maintainer-only `make commands-meta` target.
 # Resolve to ":" (the no-op shell builtin) when absent so end-user builds keep
@@ -45,7 +35,9 @@ dnl `char buffer[N]` blew an 8-12 MB stack the moment a 20 MB MONITOR-replay
 dnl line was selected. Keep this hard-error to prevent the next one.
 CXXFLAGS="-O2 -g -Wall -Werror=vla -std=c++11 $CXXFLAGS"
 
-# Checks for programs.
+# Checks for programs. AC_PROG_CC is for the hdr_histogram C sources, and it
+# must come before AX_CODE_COVERAGE, which reads $GCC.
+AC_PROG_CC
 AC_PROG_CXX
 
 # MinGW builds use Winsock and libevent's Windows thread backend.
@@ -217,11 +209,21 @@ or configure with --disable-prometheus.])])
        AC_SUBST(LIBEVENT_EXTRA_LIBS)
        ])
 
-# bash completion
-PKG_CHECK_MODULES([BASH_COMPLETION], [bash-completion >= 2.0],
-    [BASH_COMPLETION_DIR="`pkg-config --variable=completionsdir bash-completion`"],
-    [BASH_COMPLETION_DIR="$datadir/bash-completion/completions"])
+# bash completion. The default follows --prefix, so a non-root prefix install
+# and make distcheck stay inside the prefix; --prefix=/usr gives the distro
+# path. Pass DIR to install elsewhere, or --without-bash-completion-dir to skip.
+AC_ARG_WITH([bash-completion-dir],
+  [AS_HELP_STRING([--with-bash-completion-dir@<:@=DIR@:>@],
+                  [install the bash completion script in DIR
+                   @<:@DATADIR/bash-completion/completions@:>@])],
+  [], [with_bash_completion_dir=yes])
+AS_CASE(["$with_bash_completion_dir"],
+  [yes], [BASH_COMPLETION_DIR='${datadir}/bash-completion/completions'],
+  [no], [BASH_COMPLETION_DIR=],
+  [/*], [BASH_COMPLETION_DIR="$with_bash_completion_dir"],
+  [AC_MSG_ERROR([--with-bash-completion-dir requires an absolute, non-empty directory; use --without-bash-completion-dir to disable installation])])
 AC_SUBST([BASH_COMPLETION_DIR])
+AM_CONDITIONAL([INSTALL_BASH_COMPLETION], [test "x$with_bash_completion_dir" != "xno"])
 
 AC_CONFIG_FILES([
    	Makefile

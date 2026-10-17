@@ -80,10 +80,10 @@ public:
     unsigned long long int m_bytes_rx;
     unsigned long long int m_bytes_tx;
     unsigned long long int m_ops;
-    unsigned int m_hits;
-    unsigned int m_misses;
-    unsigned int m_moved;
-    unsigned int m_ask;
+    unsigned long long int m_hits;
+    unsigned long long int m_misses;
+    unsigned long long int m_moved;
+    unsigned long long int m_ask;
     unsigned long long int m_total_latency;
     std::vector<double> summarized_quantile_values;
     double m_avg_latency;
@@ -98,13 +98,14 @@ public:
      * @param histogram The histogram from which quantile values are extracted.
      * @param sorted_quantiles A sorted (ascending order) vector of quantiles for which values will be computed.
      *                         The caller must ensure the vector is sorted from smallest to largest.
+     * @param values Reusable scratch, shared across a client's sequential command summaries.
+     *               Batch p0/empty semantics are retained for existing per-second history.
      */
-    void summarize_quantiles(safe_hdr_histogram histogram, std::vector<double> sorted_quantiles);
+    void summarize_quantiles(const hdr_histogram *histogram, const std::vector<double> &sorted_quantiles,
+                             std::vector<int64_t> &values);
     void update_op(unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency);
     void update_op(unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency, unsigned int hits,
                    unsigned int misses);
-    void update_moved_op(unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency);
-    void update_ask_op(unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency);
 };
 
 class one_second_stats; // forward declaration
@@ -117,7 +118,8 @@ public:
     void reset();
     void merge(const ar_one_sec_cmd_stats &other);
     unsigned long long int ops();
-    unsigned long long int bytes();
+    unsigned long long int bytes_rx();
+    unsigned long long int bytes_tx();
     unsigned long long int total_latency();
     size_t size() const;
     one_sec_cmd_stats &at(std::size_t idx) { return m_commands.at(idx); }
@@ -292,8 +294,10 @@ public:
     //   m_retried_ops      number of distinct requests that needed at least
     //                      one retry (regardless of final outcome)
     //   m_errors           number of requests that ultimately failed (retries
-    //                      exhausted or permanent error). Excludes connection
-    //                      errors which already have their own counter.
+    //                      exhausted, permanent error, or given up on without
+    //                      a reply under --retry-on-error). Excludes
+    //                      connection errors which already have their own
+    //                      counter.
     unsigned long long int m_retry_attempts;
     unsigned long long int m_retried_ops;
     unsigned long long int m_errors;

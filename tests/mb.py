@@ -31,7 +31,7 @@ class RunConfig(object):
 
         # RLTest test names look like "file.py:test_name"; ':' (and other
         # reserved characters) cannot appear in Windows directory names.
-        safe_name = re.sub(r'[<>:"/\\|?*]', '_', name)
+        safe_name = re.sub(r'[<>:"/\\|?*]', '_', name) if os.name == 'nt' else name
         self.results_dir = os.path.join(base_results_dir,
                                         '{:04}_{}'.format(self.id, safe_name))
 

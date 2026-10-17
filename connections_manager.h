@@ -28,9 +28,14 @@ class connections_manager
 public:
     virtual unsigned long long get_reqs_processed(void) = 0;
     virtual void inc_reqs_processed(void) = 0;
+    virtual unsigned long long get_reqs_answered(void) = 0;
+    virtual void inc_reqs_answered(void) = 0;
     virtual unsigned long long get_reqs_generated(void) = 0;
     virtual void inc_reqs_generated(void) = 0;
     virtual void dec_reqs_generated(unsigned long long count) = 0;
+    // Requests sent and then given up for good under --retry-on-error (never
+    // resent, never answered): uncount them and count each as an error.
+    virtual void abandon_requests(unsigned long long count) = 0;
     virtual bool finished(void) = 0;
     virtual bool all_connections_idle(void) = 0;
 
@@ -58,6 +63,13 @@ public:
     virtual void handle_connection_disconnect(unsigned int) {}
 
     virtual int connect(void) = 0;
+    // Reconnect one dropped connection: returns 0 once a connect is issued,
+    // 1 if the reconnect was left to a later step, -1 on failure. Only the
+    // main connection exists outside cluster mode, so the default reconnects it.
+    virtual int reconnect(unsigned int) { return connect(); }
+    // --transaction: true while the given connection holds the pin of the
+    // in-flight command rotation, i.e. it will send the rotation's EXEC.
+    virtual bool is_transaction_pinned(unsigned int) { return false; }
     virtual void disconnect(void) = 0;
     virtual void disconnect_all(void) = 0;
 

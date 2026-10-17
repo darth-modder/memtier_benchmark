@@ -83,7 +83,7 @@ bool statsd_client::init(const char *host, unsigned short port, const char *pref
         m_run_label[sizeof(m_run_label) - 1] = '\0';
         // Sanitize: replace invalid characters with underscore
         for (char *p = m_run_label; *p; p++) {
-            if (!isalnum(*p) && *p != '_' && *p != '-') {
+            if (!isalnum((unsigned char) *p) && *p != '_' && *p != '-') {
                 *p = '_';
             }
         }
@@ -98,7 +98,7 @@ bool statsd_client::init(const char *host, unsigned short port, const char *pref
         strncpy(sanitized_prefix, prefix, sizeof(sanitized_prefix) - 1);
         sanitized_prefix[sizeof(sanitized_prefix) - 1] = '\0';
         for (char *p = sanitized_prefix; *p; p++) {
-            if (!isalnum(*p) && *p != '_' && *p != '-' && *p != '.') {
+            if (!isalnum((unsigned char) *p) && *p != '_' && *p != '-' && *p != '.') {
                 *p = '_';
             }
         }

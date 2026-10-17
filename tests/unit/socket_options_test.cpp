@@ -58,6 +58,15 @@ void report_connection_stage_success()
 {
     abort();
 }
+bool connection_stage_steady_state_reached()
+{
+    abort();
+}
+
+int failure_exit_code()
+{
+    return 1;
+}
 
 // These main-owned helpers also appear in tests/fuzz/fuzz_stubs.cpp. That file's
 // object_generator stubs conflict with the real objects needed for client RTTI.

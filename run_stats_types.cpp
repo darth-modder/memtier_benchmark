@@ -23,6 +23,7 @@
 #include <stdio.h>
 
 #include "run_stats_types.h"
+#include "latency_histogram.h"
 #include <limits>
 
 
@@ -75,9 +76,11 @@ void one_sec_cmd_stats::merge(const one_sec_cmd_stats &other)
     m_min_latency = other.m_min_latency < m_min_latency ? other.m_min_latency : m_min_latency;
 }
 
-void one_sec_cmd_stats::summarize_quantiles(safe_hdr_histogram histogram, std::vector<double> sorted_quantiles)
+void one_sec_cmd_stats::summarize_quantiles(const hdr_histogram *histogram, const std::vector<double> &sorted_quantiles,
+                                            std::vector<int64_t> &values)
 {
-    std::vector<int64_t> values(sorted_quantiles.size());
+    if (sorted_quantiles.empty()) return;
+    values.resize(sorted_quantiles.size());
     int result = hdr_value_at_percentiles(histogram, sorted_quantiles.data(), values.data(), sorted_quantiles.size());
     if (result != 0) {
         return;
@@ -105,18 +108,6 @@ void one_sec_cmd_stats::update_op(unsigned int bytes_rx, unsigned int bytes_tx, 
     update_op(bytes_rx, bytes_tx, latency);
     m_hits += hits;
     m_misses += misses;
-}
-
-void one_sec_cmd_stats::update_moved_op(unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency)
-{
-    update_op(bytes_rx, bytes_tx, latency);
-    m_moved++;
-}
-
-void one_sec_cmd_stats::update_ask_op(unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency)
-{
-    update_op(bytes_rx, bytes_tx, latency);
-    m_ask++;
 }
 
 void ar_one_sec_cmd_stats::setup(size_t n_arbitrary_commands)
@@ -150,11 +141,20 @@ unsigned long long int ar_one_sec_cmd_stats::ops()
 }
 
 
-unsigned long long int ar_one_sec_cmd_stats::bytes()
+unsigned long long int ar_one_sec_cmd_stats::bytes_rx()
 {
     unsigned long long int total_bytes = 0;
     for (size_t i = 0; i < m_commands.size(); i++) {
         total_bytes += m_commands[i].m_bytes_rx;
+    }
+
+    return total_bytes;
+}
+
+unsigned long long int ar_one_sec_cmd_stats::bytes_tx()
+{
+    unsigned long long int total_bytes = 0;
+    for (size_t i = 0; i < m_commands.size(); i++) {
         total_bytes += m_commands[i].m_bytes_tx;
     }
 
@@ -255,12 +255,19 @@ void totals_cmd::summarize(const one_sec_cmd_stats &other, unsigned long long te
     m_ops = other.m_ops;
     m_total_latency = other.m_total_latency;
 
-    m_ops_sec = (double) other.m_ops / test_duration_usec * 1000000;
     if (other.m_ops > 0) {
         m_latency = (double) (other.m_total_latency / other.m_ops) / 1000;
     } else {
         m_latency = 0;
     }
+
+    // A run where no client ever connected has a zero duration; report 0
+    // rates instead of NaN (printed as -nan, written to JSON as null).
+    if (test_duration_usec == 0) {
+        m_ops_sec = m_bytes_sec = m_bytes_sec_rx = m_bytes_sec_tx = m_moved_sec = m_ask_sec = 0;
+        return;
+    }
+    m_ops_sec = (double) other.m_ops / test_duration_usec * 1000000;
     m_bytes_sec = ((other.m_bytes_rx + other.m_bytes_tx) / 1024.0) / test_duration_usec * 1000000;
     m_bytes_sec_rx = (other.m_bytes_rx / 1024.0) / test_duration_usec * 1000000;
     m_bytes_sec_tx = (other.m_bytes_tx / 1024.0) / test_duration_usec * 1000000;
@@ -309,6 +316,8 @@ totals::totals() :
         m_ar_commands(),
         m_ops_sec(0),
         m_bytes_sec(0),
+        m_bytes_sec_rx(0),
+        m_bytes_sec_tx(0),
         m_hits_sec(0),
         m_misses_sec(0),
         m_moved_sec(0),
@@ -347,6 +356,8 @@ void totals::add(const totals &other)
     m_moved_sec += other.m_moved_sec;
     m_ask_sec += other.m_ask_sec;
     m_bytes_sec += other.m_bytes_sec;
+    m_bytes_sec_rx += other.m_bytes_sec_rx;
+    m_bytes_sec_tx += other.m_bytes_sec_tx;
     m_bytes_rx += other.m_bytes_rx;
     m_bytes_tx += other.m_bytes_tx;
     m_latency += other.m_latency;
@@ -371,7 +382,7 @@ void totals::update_op(unsigned long long int bytes_rx, unsigned long long int b
     m_ops++;
     m_latency += latency;
     m_total_latency += latency;
-    hdr_record_value_capped(latency_histogram, latency);
+    memtier_record_latency(latency_histogram, latency);
 }
 
 void totals::update_op(unsigned long long int bytes_rx, unsigned long long int bytes_tx, unsigned int latency,

@@ -16,12 +16,13 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 AUTOMAKE_OPTIONS = foreign 1.9 subdir-objects
-CODE_COVERAGE_IGNORE_PATTERN='*/deps/hdr_histogram/*'
+CODE_COVERAGE_IGNORE_PATTERN='*/deps/hdr_histogram/*' '*/tests/*'
 
 EXTRA_DIST = README.md COPYING version.sh \
 	scripts/fetch_commands_meta.sh \
 	scripts/gen_command_meta.py \
-	deps/commands_json/REDIS_TAG.txt
+	deps/commands_json/REDIS_TAG.txt \
+	deps/hdr_histogram/README.md deps/hdr_histogram/SHA256SUMS
 
 # Generate version.h before building
 BUILT_SOURCES = version.h
@@ -31,8 +32,10 @@ version.h:
 	$(SHELL) $(srcdir)/version.sh
 
 bin_PROGRAMS = memtier_benchmark
-completionsdir=$(BASH_COMPLETION_DIR)
-completions_DATA=bash-completion/memtier_benchmark
+if INSTALL_BASH_COMPLETION
+completionsdir = $(BASH_COMPLETION_DIR)
+dist_completions_DATA = bash-completion/memtier_benchmark
+endif
 
 memtier_benchmark_CPPFLAGS = \
 	$(CODE_COVERAGE_CFLAGS) \
@@ -44,14 +47,14 @@ memtier_benchmark_CPPFLAGS = \
 	$(LIBSSL_CFLAGS)
 memtier_benchmark_SOURCES = \
 	platform_compat.h \
-	memtier_benchmark.cpp memtier_benchmark.h \
+	memtier_benchmark.cpp memtier_benchmark.h crash_report.h \
 	client.cpp client.h \
 	cluster_client.cpp cluster_client.h \
 	shard_connection.cpp shard_connection.h connections_manager.h \
-	run_stats_types.cpp run_stats_types.h \
-	run_stats.cpp run_stats.h \
-	JSON_handler.cpp JSON_handler.h \
-	protocol.cpp protocol.h \
+	run_stats_types.cpp run_stats_types.h latency_percentiles.h \
+	run_stats.cpp run_stats.h latency_histogram.h \
+	JSON_handler.cpp JSON_handler.h utf8.cpp utf8.h \
+	protocol.cpp protocol.h keylist_growth.h libmemcached_protocol/binary.h libmemcached_protocol/vbucket.h \
 	obj_gen.cpp obj_gen.h \
 	item.cpp item.h \
 	file_io.cpp file_io.h \
@@ -60,13 +63,16 @@ memtier_benchmark_SOURCES = \
 	statsd.cpp statsd.h \
 	prometheus_metrics.cpp prometheus_metrics.h \
 	prometheus_exporter.cpp prometheus_exporter.h \
-	retry_policy.cpp retry_policy.h \
-	deps/hdr_histogram/hdr_histogram_log.c deps/hdr_histogram/hdr_histogram_log.h deps/hdr_histogram/byteorder.h \
+	retry_policy.cpp retry_policy.h retry_backoff.h \
+	deps/hdr_histogram/hdr_histogram_log.c deps/hdr_histogram/hdr_histogram_log.h \
 	deps/hdr_histogram/hdr_histogram.c deps/hdr_histogram/hdr_histogram.h \
-	deps/hdr_histogram/hdr_time.c deps/hdr_histogram/hdr_time.h deps/hdr_histogram/hdr_encoding.c deps/hdr_histogram/hdr_encoding.h
+	deps/hdr_histogram/hdr_time.c deps/hdr_histogram/hdr_time.h deps/hdr_histogram/hdr_encoding.c deps/hdr_histogram/hdr_malloc.h
 
+# The vendored AX_CODE_COVERAGE (serial 15) puts -lgcov in CODE_COVERAGE_LDFLAGS
+# and has no CODE_COVERAGE_LIBS. Link it as a library, after the objects, so
+# the unit tests that reuse memtier_benchmark_LDADD get the gcov runtime too.
 memtier_benchmark_LDADD = \
-	$(CODE_COVERAGE_LIBS) \
+	$(CODE_COVERAGE_LDFLAGS) \
 	$(LIBEVENT_EXTRA_LIBS) \
 	$(LIBEVENT_LIBS) \
 	$(LIBEVENT_PTHREADS_LIBS) \
@@ -75,19 +81,20 @@ memtier_benchmark_LDADD = \
 	$(LIBSSL_LIBS)
 
 
-check_PROGRAMS = prometheus_metrics_test rate_limiter_test
+check_PROGRAMS = prometheus_metrics_test rate_limiter_test retry_backoff_test keylist_growth_test hdr_histogram_test cluster_transaction_test \
+    cluster_hslot_test run_stats_counters_test run_stats_merge_test crash_report_test
 if !MEMTIER_WINDOWS
-check_PROGRAMS += socket_options_test
+check_PROGRAMS += retry_drain_test socket_options_test reconnect_siblings_test
 endif
 
-# The metrics test links only the pure layer (prometheus_metrics.{h,cpp}).
+# The metrics test links only the pure layer (prometheus_metrics.{h,cpp}, utf8.{h,cpp}).
 # First `make check` program in the repo. The metrics layer is config-free and
 # libevent-free (Decisions #52 purity contract), so this links only the metrics
 # layer + hdr_histogram (a leaf dep). No $(LIBEVENT_CFLAGS) by design (hygiene
 # only; purity is enforced by the S10 grep audit). -I$(srcdir) is required for
 # VPATH builds.
 prometheus_metrics_test_SOURCES = tests/unit/prometheus_metrics_test.cpp \
-    prometheus_metrics.cpp prometheus_metrics.h \
+    prometheus_metrics.cpp prometheus_metrics.h utf8.cpp utf8.h latency_histogram.h \
     deps/hdr_histogram/hdr_histogram.c deps/hdr_histogram/hdr_histogram.h
 prometheus_metrics_test_CPPFLAGS = -I$(srcdir)
 prometheus_metrics_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
@@ -99,6 +106,17 @@ endif
 rate_limiter_test_SOURCES = tests/unit/rate_limiter_test.cpp rate_limiter.h
 rate_limiter_test_CPPFLAGS = -I$(srcdir)
 rate_limiter_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+keylist_growth_test_SOURCES = tests/unit/keylist_growth_test.cpp keylist_growth.h
+keylist_growth_test_CPPFLAGS = -I$(srcdir)
+keylist_growth_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+retry_backoff_test_SOURCES = tests/unit/retry_backoff_test.cpp retry_backoff.h
+retry_backoff_test_CPPFLAGS = -I$(srcdir)
+retry_backoff_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+# Resend a retry whose drain timer fired before its connection could send.
+retry_drain_test_SOURCES = tests/unit/retry_drain_test.cpp
+retry_drain_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+retry_drain_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+retry_drain_test_LDADD = $(filter-out memtier_benchmark-memtier_benchmark.$(OBJEXT),$(memtier_benchmark_OBJECTS)) $(memtier_benchmark_LDADD)
 # Exercise the real connection setup with a test-only socket descriptor recorder.
 # The test includes shard_connection.cpp; do not compile it a second time here.
 socket_options_test_SOURCES = tests/unit/socket_options_test.cpp
@@ -109,10 +127,73 @@ socket_options_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g $(SOCKET_TEST_EXT
 # Reuse the real client RTTI for UBSan; the test supplies main and shard_connection.
 socket_options_test_LDADD = $(filter-out memtier_benchmark-memtier_benchmark.$(OBJEXT) \
     memtier_benchmark-shard_connection.$(OBJEXT),$(memtier_benchmark_OBJECTS)) $(memtier_benchmark_LDADD)
+hdr_histogram_test_SOURCES = tests/unit/hdr_histogram_test.cpp latency_histogram.h latency_percentiles.h \
+    run_stats_types.cpp run_stats_types.h \
+    deps/hdr_histogram/hdr_histogram.c deps/hdr_histogram/hdr_histogram.h \
+    deps/hdr_histogram/hdr_histogram_log.c deps/hdr_histogram/hdr_histogram_log.h \
+    deps/hdr_histogram/hdr_encoding.c deps/hdr_histogram/hdr_time.c \
+    deps/hdr_histogram/hdr_time.h deps/hdr_histogram/hdr_malloc.h
+# run_stats_types includes the TLS-aware benchmark config; honor non-system OpenSSL paths.
+hdr_histogram_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+hdr_histogram_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+# memtier_benchmark_CPPFLAGS carries coverage flags; link their runtime too.
+hdr_histogram_test_LDADD = $(CODE_COVERAGE_LDFLAGS)
+# Exercise transaction pin release and lookahead through the real cluster client.
+cluster_transaction_test_SOURCES = tests/unit/cluster_transaction_test.cpp
+cluster_transaction_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+cluster_transaction_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+cluster_transaction_test_LDADD = $(filter-out memtier_benchmark-memtier_benchmark.$(OBJEXT),$(memtier_benchmark_OBJECTS)) $(memtier_benchmark_LDADD)
+# A failed connect after the run is over must not end a client whose other
+# connection still has a reconnect pending.
+reconnect_siblings_test_SOURCES = tests/unit/reconnect_siblings_test.cpp
+reconnect_siblings_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+reconnect_siblings_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+reconnect_siblings_test_LDADD = $(filter-out memtier_benchmark-memtier_benchmark.$(OBJEXT),$(memtier_benchmark_OBJECTS)) $(memtier_benchmark_LDADD)
+# Check hash slots, including hash tags, against CLUSTER KEYSLOT.
+cluster_hslot_test_SOURCES = tests/unit/cluster_hslot_test.cpp
+cluster_hslot_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+cluster_hslot_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+cluster_hslot_test_LDADD = $(filter-out memtier_benchmark-memtier_benchmark.$(OBJEXT),$(memtier_benchmark_OBJECTS)) $(memtier_benchmark_LDADD)
+# Sum per-second hit/miss/MOVED/ASK counters past 2^32, as run_stats::summarize() does.
+run_stats_counters_test_SOURCES = tests/unit/run_stats_counters_test.cpp run_stats_types.cpp run_stats_types.h \
+    latency_histogram.h latency_percentiles.h \
+    deps/hdr_histogram/hdr_histogram.c deps/hdr_histogram/hdr_histogram.h \
+    deps/hdr_histogram/hdr_time.c deps/hdr_histogram/hdr_time.h deps/hdr_histogram/hdr_malloc.h
+run_stats_counters_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+run_stats_counters_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+run_stats_counters_test_LDADD = $(CODE_COVERAGE_LDFLAGS)
+# Average Start/Finish time over thousands of merged runs, as run_benchmark() does.
+run_stats_merge_test_SOURCES = tests/unit/run_stats_merge_test.cpp
+run_stats_merge_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+run_stats_merge_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+run_stats_merge_test_LDADD = $(filter-out memtier_benchmark-memtier_benchmark.$(OBJEXT),$(memtier_benchmark_OBJECTS)) $(memtier_benchmark_LDADD)
+# Crash report timestamp formatting and UTC offset (#681), against libc.
+crash_report_test_SOURCES = tests/unit/crash_report_test.cpp crash_report.h
+crash_report_test_CPPFLAGS = -I$(srcdir)
+crash_report_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+# --data-import reader: errors, truncated last item, reopen (#766).
+check_PROGRAMS += file_io_test
+file_io_test_SOURCES = tests/unit/file_io_test.cpp file_io.cpp file_io.h item.cpp item.h
+file_io_test_CPPFLAGS = -I$(srcdir)
+file_io_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
 TESTS = $(check_PROGRAMS)
 
+# Keep the release amalgamation byte-identical to the recorded upstream asset.
+# This runs in CI and the local gate through make check, including VPATH builds.
+.PHONY: check-hdr-vendor
+check-local: check-hdr-vendor
+check-hdr-vendor:
+	@cd "$(srcdir)/deps/hdr_histogram" && \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum -c SHA256SUMS; \
+	elif command -v shasum >/dev/null 2>&1; then \
+		shasum -a 256 -c SHA256SUMS; \
+	else \
+		echo "HDR vendor verification requires sha256sum or shasum" >&2; \
+		exit 1; \
+	fi
+
 @CODE_COVERAGE_RULES@
-memtier_benchmark_LDFLAGS = $(CODE_COVERAGE_LDFLAGS)
 
 dist_man1_MANS = memtier_benchmark.1
 

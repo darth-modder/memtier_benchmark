@@ -167,12 +167,24 @@ protected:
             return *this;
         }
     } m_started;
-    bool m_interrupted;
+    // Set by client_group::interrupt() on the main thread, possibly while the
+    // worker reads it (client_group::run()).
+    copyable_atomic_bool m_interrupted;
+    // Workload requests abandoned because no reply came within
+    // TEST_TIME_DRAIN_GRACE_SECS after --test-time ended.
+    unsigned long long int m_unanswered_requests;
+    // Number of runs aggregate_average() averaged into this object; 0 for a
+    // real run. m_start_time / m_end_time then span the SUMMED duration of
+    // the runs, and the counts stay summed (see aggregate_average()), so
+    // print_json() divides them by it when it writes them.
+    size_t m_averaged_runs;
 
     totals m_totals;
 
     std::list<one_second_stats> m_stats;
     std::vector<double> quantiles_list;
+    // Scratch shared by this client's sequential per-command summaries. Never stored in history.
+    std::vector<int64_t> m_quantile_values;
 
     // current second stats ( appended to m_stats and reset every second )
     one_second_stats m_cur_stats;
@@ -191,21 +203,16 @@ protected:
     safe_hdr_histogram inst_m_totals_latency_histogram;
 
     // Protects inst_m_totals_latency_histogram against concurrent reset/aggregation reads.
-    // Worker threads use hdr_record_value_capped_atomic() for lock-free writes;
+    // Worker threads use memtier_record_latency_atomic() for lock-free writes;
     // this mutex serializes hdr_reset and hdr_add from the main thread.
     reinit_mutex_t m_inst_histogram_mutex;
 
-    // Last inst-totals histogram total_count copied by the Prometheus gated
-    // aggregation (copy_inst_histogram_if_changed). Main-thread-only; plain
-    // int64_t so run_stats stays copyable when collected into vectors post-join.
-    int64_t m_prom_last_copied_total;
-
-    // Per-bucket snapshot of inst_m_totals_latency_histogram as of the previous
-    // gated copy, so copy_inst_histogram_if_changed adds only the positive
-    // per-bucket delta (each latency sample folded at most once) instead of the
-    // whole histogram. safe_hdr_histogram is deep-copyable, so run_stats stays
-    // copyable when collected into vectors post-join. Main-thread-only.
-    safe_hdr_histogram m_prom_last_inst;
+    // Completed seconds of inst_m_totals_latency_histogram not yet drained by
+    // the Prometheus exporter. The worker folds each second into it just before
+    // the per-second reset (only when the exporter is enabled), and the main
+    // thread drains it (add + reset) in drain_prom_latency_histogram. Both sides
+    // hold m_inst_histogram_mutex, so every sample is exported exactly once.
+    safe_hdr_histogram m_prom_pending_latency_histogram;
 
     // Cumulative hits/misses bookkeeping for arbitrary commands. Indexed by
     // arbitrary command index. Per-key vectors are sized to the spec-resolved
@@ -228,8 +235,11 @@ public:
     void setup_arbitrary_commands(size_t n_arbitrary_commands);
     void set_start_time(struct timeval *start_time);
     void set_end_time(struct timeval *end_time);
-    void set_interrupted(bool interrupted) { m_interrupted = interrupted; }
-    bool get_interrupted() const { return m_interrupted; }
+    struct timeval get_start_time(void) const { return m_start_time; }
+    void set_interrupted(bool interrupted) { m_interrupted.flag.store(interrupted, std::memory_order_relaxed); }
+    bool get_interrupted() const { return m_interrupted.flag.load(std::memory_order_relaxed); }
+    void add_unanswered_requests(unsigned long long int n) { m_unanswered_requests += n; }
+    unsigned long long int get_unanswered_requests() const { return m_unanswered_requests; }
 
     void update_get_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency,
                        unsigned int hits, unsigned int misses);
@@ -241,21 +251,27 @@ public:
     // run_stats are merged across threads.
     void inc_retry_attempt() { m_totals.m_retry_attempts++; }
     void inc_retried_op() { m_totals.m_retried_ops++; }
-    void inc_error() { m_totals.m_errors++; }
+    void inc_error(unsigned long long int count = 1) { m_totals.m_errors += count; }
 
     unsigned long long int get_total_retry_attempts() const { return m_totals.m_retry_attempts; }
     unsigned long long int get_total_retried_ops() const { return m_totals.m_retried_ops; }
     unsigned long long int get_total_errors() const { return m_totals.m_errors; }
 
-    void update_moved_get_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency);
-    void update_moved_set_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency);
+    // A retried redirect is an event, not a completed operation. Only terminal
+    // responses contribute bytes, latency samples and operation counts.
+    void update_moved_get_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency,
+                             bool completed);
+    void update_moved_set_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency,
+                             bool completed);
     void update_moved_arbitrary_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx,
-                                   unsigned int latency, size_t arbitrary_index);
+                                   unsigned int latency, size_t arbitrary_index, bool completed);
 
-    void update_ask_get_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency);
-    void update_ask_set_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency);
+    void update_ask_get_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency,
+                           bool completed);
+    void update_ask_set_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency,
+                           bool completed);
     void update_ask_arbitrary_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency,
-                                 size_t arbitrary_index);
+                                 size_t arbitrary_index, bool completed);
 
     void update_wait_op(struct timeval *ts, unsigned int latency);
     void update_arbitrary_op(struct timeval *ts, unsigned int bytes_rx, unsigned int bytes_tx, unsigned int latency,
@@ -332,7 +348,7 @@ public:
 
     void aggregate_average(const std::vector<run_stats> &all_stats);
     void summarize(totals &result) const;
-    void summarize_current_second();
+    void summarize_current_second(void);
     void merge(const run_stats &other, int iteration);
     std::vector<one_sec_cmd_stats> get_one_sec_cmd_stats_get();
     std::vector<one_sec_cmd_stats> get_one_sec_cmd_stats_set();
@@ -347,14 +363,13 @@ public:
     // Use this instead of a raw pointer getter to avoid data races with worker threads.
     void copy_inst_histogram(hdr_histogram *target) const;
 
-    // Like copy_inst_histogram, but only folds the per-bucket increment since
-    // the previous gated copy (via prom::hdr_add_positive_delta), so each latency
-    // sample is added to target at most once even when two 1 Hz exporter ticks
-    // land within one worker-second. Skips frozen histograms (clients that
-    // stopped completing ops) so a dead connection's last partial second is not
-    // re-added on every tick. Main-thread-only; reads total_count and updates
-    // m_prom_last_inst / m_prom_last_copied_total under m_inst_histogram_mutex.
-    void copy_inst_histogram_if_changed(hdr_histogram *target);
+    // Move the latency samples of every second completed since the previous
+    // call into target (Prometheus exporter, main thread). Lags the live
+    // second by up to one second; the final partial second is folded by
+    // set_end_time(). With run_end (post-join only) it also moves what is
+    // left in the live histogram (ops recorded after the client's
+    // set_end_time()). After the run-end drain every op has been drained.
+    void drain_prom_latency_histogram(hdr_histogram *target, bool run_end);
     void save_csv_one_sec_cluster(FILE *f);
     void save_csv_set_get_commands(FILE *f, bool cluster_mode);
     void save_csv_arbitrary_commands_one_sec(FILE *f, arbitrary_command_list &command_list,
@@ -367,7 +382,9 @@ public:
     bool save_hdr_get_command(benchmark_config *config, int run_number);
     bool save_hdr_arbitrary_commands(benchmark_config *config, int run_number);
 
-    bool save_csv(const char *filename, benchmark_config *config);
+    // Returns false if the file could not be opened or written; prints why
+    // only if report_error.
+    bool save_csv(const char *filename, benchmark_config *config, bool report_error);
     void debug_dump(void);
 
     // function to handle the results output
@@ -394,8 +411,8 @@ public:
                               const std::vector<aggregated_command_type_stats> *aggregated = nullptr);
     void print_avg_latency_column(output_table &table,
                                   const std::vector<aggregated_command_type_stats> *aggregated = nullptr);
-    void print_quantile_latency_column(output_table &table, double quantile, char *label,
-                                       const std::vector<aggregated_command_type_stats> *aggregated = nullptr);
+    void print_quantile_latency_columns(output_table &table, const std::vector<double> &quantiles,
+                                        const std::vector<aggregated_command_type_stats> *aggregated = nullptr);
     void print_kb_sec_column(output_table &table,
                              const std::vector<aggregated_command_type_stats> *aggregated = nullptr);
     void print_json(json_handler *jsonhandler, arbitrary_command_list &command_list, bool cluster_mode,

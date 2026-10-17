@@ -43,14 +43,42 @@ $ sudo apt-get install build-essential autoconf automake \
 To build natively on macOS, use Homebrew to install the required dependencies:
 
 ```
-$ brew install autoconf automake libtool libevent pkg-config openssl@3.0 clang-format
+$ brew install autoconf automake libevent pkg-config clang-format
 ```
 
-When running `./configure`, if it fails to find libssl it may be necessary to
-tweak the `PKG_CONFIG_PATH` environment variable:
+memtier must use the same OpenSSL that Homebrew's `libevent` is linked against.
+Mixing two OpenSSL versions in one process crashes on `--tls`. Which OpenSSL
+that is depends on the `libevent` revision you have, so ask Homebrew and point
+`PKG_CONFIG_PATH` at it when running `./configure`:
 
 ```
-PKG_CONFIG_PATH=`brew --prefix openssl@3.0`/lib/pkgconfig ./configure
+$ ssl=$(brew deps libevent | grep '^openssl@' | head -n 1)
+$ brew install $ssl
+$ PKG_CONFIG_PATH="$(brew --prefix $ssl)/lib/pkgconfig" ./configure
+```
+
+To use a different OpenSSL, install it (for example `brew install openssl@3`),
+build libevent from source against it, and put both prefixes in
+`PKG_CONFIG_PATH`. `scripts/build-macos-libevent.sh` does this and installs it
+under `$RUNNER_TEMP/libevent-memtier`:
+
+```
+$ brew install openssl@3
+$ RUNNER_TEMP=$HOME/build bash scripts/build-macos-libevent.sh "$(brew --prefix openssl@3)"
+$ PKG_CONFIG_PATH="$HOME/build/libevent-memtier/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig" ./configure
+```
+
+After `make`, check that `memtier_benchmark` and libevent's `libevent_openssl`
+link the same OpenSSL. For the Homebrew libevent build:
+
+```
+$ bash scripts/check-macos-tls-links.sh "$(brew --prefix $ssl)" "$(brew --prefix libevent)"
+```
+
+For the source-built libevent:
+
+```
+$ RUNNER_TEMP=$HOME/build bash scripts/check-macos-tls-links.sh "$(brew --prefix openssl@3)"
 ```
 
 ### Windows (MSYS2 / MinGW-w64)
@@ -129,6 +157,17 @@ $ ./configure
 $ make
 $ sudo make install
 ```
+
+The bash completion script is installed under the prefix, in
+`$prefix/share/bash-completion/completions` (`/usr/local/share/...` by
+default). bash-completion 2.x finds the default location when `XDG_DATA_DIRS`
+is unset or includes `/usr/local/share`. For another prefix, add its `share`
+directory to `XDG_DATA_DIRS`, or use the system completion directory:
+`./configure --with-bash-completion-dir="$(pkg-config --variable=completionsdir bash-completion)"`.
+An explicit directory must be absolute and non-empty. Use
+`--without-bash-completion-dir` to skip installation. Upgrading from a build
+that installed into `/usr/share` leaves that old copy in place; remove the
+old completion if it shadows the one installed under the new prefix.
 
 **Note**: Debug symbols (`-g`) are included by default in all builds for crash analysis and debugging. The default build flags are `-O2 -g -Wall`, which provides:
 - Full optimizations (`-O2`) for production performance
@@ -413,6 +452,24 @@ When a crash occurs, memtier_benchmark will automatically:
 
        Please report this bug by opening an issue on github.com/redis/memtier_benchmark
 ```
+
+The header lines (START, signal, signal code, fault address) are written with
+async-signal-safe calls only, so they appear even when the crash interrupted a
+thread holding the malloc, stdio or time zone lock. The rest of the report is
+best effort. If the handler gets stuck after the header, a watchdog ends the
+process with SIGALRM about 5 seconds after the crash, and the report ends
+with this line instead of the END marker:
+
+```
+=== MEMTIER_BENCHMARK BUG REPORT INCOMPLETE: crash handler timed out ===
+```
+
+If even that line cannot be written (for example, stderr is a pipe that nobody
+reads), the process still exits about a second later. In both cases the
+process ends by SIGALRM rather than the original signal, so no core dump is
+written. ThreadSanitizer builds never print the INCOMPLETE line: there the
+watchdog keeps the default SIGALRM action, because TSan would defer a handler
+for it indefinitely.
 
 ### Testing the Crash Handler
 
