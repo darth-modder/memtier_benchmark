@@ -5036,8 +5036,18 @@ static void check_output_prefix_dir(const char *option, const char *prefix)
 // written into it. Reopen each closed fd on /dev/null instead, which keeps
 // the numbering safe. Returns a mask with bit (1 << fd) set for each fd that
 // was closed.
+#ifdef _WIN32
+// Probing a closed CRT descriptor otherwise invokes UCRT's default invalid-
+// parameter handler. Keep this override confined to startup's current thread.
+static void closed_fd_invalid_parameter(const wchar_t *, const wchar_t *, const wchar_t *, unsigned int, uintptr_t) {}
+#endif
+
 static unsigned int reopen_closed_std_fds(void)
 {
+#ifdef _WIN32
+    _invalid_parameter_handler previous_handler =
+        _set_thread_local_invalid_parameter_handler(closed_fd_invalid_parameter);
+#endif
     unsigned int closed_mask = 0;
     for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
 #ifdef _WIN32
@@ -5055,6 +5065,18 @@ static unsigned int reopen_closed_std_fds(void)
             nfd = open("/dev/null", O_RDWR);
 #endif
         } while (nfd < 0 && errno == EINTR);
+#ifdef _WIN32
+        // A detached process can have an allocated CRT descriptor whose OS
+        // handle is -2. open() then chooses another slot; duplicate onto the
+        // original descriptor rather than assuming the lowest slot was free.
+        if (nfd >= 0 && nfd != fd) {
+            int result = _dup2(nfd, fd);
+            int err = errno;
+            close(nfd);
+            nfd = result == 0 ? fd : -1;
+            errno = err;
+        }
+#endif
         if (nfd != fd) {
             int err = nfd < 0 ? errno : EBADF;
             // Report it only if stderr is open (it may be the closed fd).
@@ -5068,6 +5090,9 @@ static unsigned int reopen_closed_std_fds(void)
         }
         closed_mask |= 1u << fd;
     }
+#ifdef _WIN32
+    _set_thread_local_invalid_parameter_handler(previous_handler);
+#endif
     return closed_mask;
 }
 

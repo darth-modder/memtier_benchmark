@@ -171,6 +171,30 @@ class WindowsSmokeTests(unittest.TestCase):
         self.assertLess(code, NTSTATUS_ERROR_MIN, "crashed: 0x%08x" % code)
         self.assertNotIn("BUG REPORT", result.stderr)
 
+    @unittest.skipUnless(sys.platform == "win32", "detached CRT handles are Windows-specific")
+    def test_detached_process_writes_requested_output(self):
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESTDHANDLES
+        startup.hStdInput = startup.hStdOutput = startup.hStdError = 0
+        output_path = os.path.join(self.tmp.name, "detached.txt")
+        with RESPCommandSink() as sink:
+            child = subprocess.Popen([EXE, "-s", sink.host, "-p", str(sink.port), "-t", "1", "-c", "1",
+                                      "-n", "20", "--ratio=1:0", "--out-file=" + output_path,
+                                      "--json-out-file=" + self.json_path], startupinfo=startup,
+                                     creationflags=subprocess.DETACHED_PROCESS)
+            try:
+                self.assertEqual(child.wait(timeout=20), 0)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            self.assertTrue(sink.wait_idle())
+            self.assertEqual(sink.request_count, 20)
+        with open(self.json_path) as output:
+            self.assertEqual(json.load(output)["ALL STATS"]["Sets"]["Count"], 20)
+        with open(output_path) as output:
+            self.assertIn("Totals", output.read())
+
     @unittest.skipUnless(sys.platform == "win32", "AF_UNIX sockets are only rejected on Windows")
     def test_unix_socket_is_rejected(self):
         result = run_memtier("-S", "foo")
