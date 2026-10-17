@@ -170,6 +170,7 @@ class WindowsSmokeTests(unittest.TestCase):
         self.assertNotEqual(code, 0, result.stderr)
         self.assertLess(code, NTSTATUS_ERROR_MIN, "crashed: 0x%08x" % code)
         self.assertNotIn("BUG REPORT", result.stderr)
+        self.assertIn("Connection error:", result.stderr)
 
     @unittest.skipUnless(sys.platform == "win32", "detached CRT handles are Windows-specific")
     def test_detached_process_writes_requested_output(self):

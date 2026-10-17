@@ -5038,15 +5038,14 @@ static void check_output_prefix_dir(const char *option, const char *prefix)
 // was closed.
 #ifdef _WIN32
 // Probing a closed CRT descriptor otherwise invokes UCRT's default invalid-
-// parameter handler. Keep this override confined to startup's current thread.
+// parameter handler. Restore it before startup creates any worker threads.
 static void closed_fd_invalid_parameter(const wchar_t *, const wchar_t *, const wchar_t *, unsigned int, uintptr_t) {}
 #endif
 
 static unsigned int reopen_closed_std_fds(void)
 {
 #ifdef _WIN32
-    _invalid_parameter_handler previous_handler =
-        _set_thread_local_invalid_parameter_handler(closed_fd_invalid_parameter);
+    _invalid_parameter_handler previous_handler = _set_invalid_parameter_handler(closed_fd_invalid_parameter);
 #endif
     unsigned int closed_mask = 0;
     for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
@@ -5091,7 +5090,7 @@ static unsigned int reopen_closed_std_fds(void)
         closed_mask |= 1u << fd;
     }
 #ifdef _WIN32
-    _set_thread_local_invalid_parameter_handler(previous_handler);
+    _set_invalid_parameter_handler(previous_handler);
 #endif
     return closed_mask;
 }
