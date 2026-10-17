@@ -5002,7 +5002,10 @@ static void check_output_prefix_dir(const char *option, const char *prefix)
     std::string dir(prefix);
 #ifdef _WIN32
     size_t slash = dir.find_last_of("/\\");
-    dir = slash == std::string::npos ? "." : dir.substr(0, slash + 1);
+    // Keep a separator only for a root; UCRT stat rejects trailing separators
+    // on ordinary directories.
+    bool root = slash == 0 || (slash == 2 && dir[1] == ':');
+    dir = slash == std::string::npos ? "." : dir.substr(0, slash + (root ? 1 : 0));
 #else
     size_t slash = dir.rfind('/');
     dir = slash == std::string::npos ? "." : (slash == 0 ? "/" : dir.substr(0, slash));

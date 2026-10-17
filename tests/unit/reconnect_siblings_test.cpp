@@ -24,8 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/un.h>
+#include "platform_compat.h"
 #include <unistd.h>
 #include <string>
 #include <event2/event.h>
@@ -93,14 +92,22 @@ public:
 // A sibling that is connecting (or connected) and holds requests for replay
 // will resend them (--retry-on-error): it keeps the client going. Once it is
 // disconnected with nothing pending, it will never resend them.
-static void test_sibling_with_replay(const char *path)
+static void test_sibling_with_replay()
 {
-    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
-    sockaddr_un address = {};
-    address.sun_family = AF_UNIX;
-    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
-    check(listener >= 0 && bind(listener, (sockaddr *) &address, sizeof(address)) == 0 && listen(listener, 4) == 0,
-          "unix listener");
+    evutil_socket_t listener = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t address_len = sizeof(address);
+    check(listener >= 0 && bind(listener, (sockaddr *) &address, sizeof(address)) == 0 && listen(listener, 4) == 0 &&
+              getsockname(listener, (sockaddr *) &address, &address_len) == 0,
+          "loopback listener");
+    connect_info endpoint = {};
+    endpoint.ci_family = AF_INET;
+    endpoint.ci_socktype = SOCK_STREAM;
+    endpoint.ci_protocol = IPPROTO_TCP;
+    endpoint.ci_addr = (sockaddr *) &address;
+    endpoint.ci_addrlen = address_len;
 
     arbitrary_command_list commands;
     benchmark_config config = {};
@@ -112,7 +119,6 @@ static void test_sibling_with_replay(const char *path)
     config.test_time = 10;
     config.reconnect_on_error = true;
     config.retry_on_error = true;
-    config.unix_socket = path;
 
     event_base *base = event_base_new();
     abstract_protocol *protocol = protocol_factory(config.protocol);
@@ -123,8 +129,8 @@ static void test_sibling_with_replay(const char *path)
         shard_connection &first = *manager.get_connections()[0];
         shard_connection &second = *manager.get_connections()[1];
 
-        connect_info unused = {};
-        check(second.connect(&unused) == 0, "the sibling connects");
+        second.set_address_port("127.0.0.1", "0");
+        check(second.connect(&endpoint) == 0, "the sibling connects");
         check(second.get_connection_state() != conn_disconnected, "the sibling is not disconnected");
         request *req = new request(rt_set, 0, NULL, 1);
         req->m_serialized = strdup("*1\r\n$4\r\nPING\r\n");
@@ -140,20 +146,16 @@ static void test_sibling_with_replay(const char *path)
     }
     delete protocol;
     event_base_free(base);
-    close(listener);
-    unlink(path);
+    evutil_closesocket(listener);
 }
 
 int main()
 {
-    char directory[] = "/tmp/memtier-reconnect-siblings-XXXXXX";
-    if (mkdtemp(directory) == NULL) {
-        perror("mkdtemp");
-        return 1;
-    }
-    std::string path = std::string(directory) + "/socket";
-    test_sibling_with_replay(path.c_str());
-    rmdir(directory);
+#ifdef _WIN32
+    WSADATA data;
+    check(WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock startup");
+#endif
+    test_sibling_with_replay();
 
     arbitrary_command_list commands;
     benchmark_config config = {};

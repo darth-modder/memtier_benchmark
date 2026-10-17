@@ -100,7 +100,8 @@ static void check_option(evutil_socket_t fd, int level, int option, const char *
     }
 }
 
-static void check_connections(struct connect_info &address, const char *unix_path, bool tls, const char *context)
+static void check_connections(struct connect_info &address, const char *unix_path, bool tls, const char *context,
+                              bool immediate_failure = false)
 {
     arbitrary_command_list commands;
     benchmark_config config = {};
@@ -142,6 +143,12 @@ static void check_connections(struct connect_info &address, const char *unix_pat
             char label[128];
             snprintf(label, sizeof(label), "%s connection %u", context, attempt + 1);
             unsigned int before = socket_creations;
+            if (immediate_failure) {
+                check(connection.connect(&address) == -1, label, "hard connect error returns immediately");
+                check(connection.get_connection_state() == conn_disconnected, label, "failed socket disconnected");
+                event_base_loop(base, EVLOOP_NONBLOCK);
+                break;
+            }
             if (!check(connection.connect(&address) == 0, label, "connect succeeds")) break;
             check(socket_creations == before + 1, label, "connect creates a new socket");
             evutil_socket_t fd = observed_socket;
@@ -232,6 +239,15 @@ static void test_tcp(int family)
     check_connections(address, NULL, false, label);
 #ifdef USE_TLS
     check_connections(address, NULL, true, family == AF_INET ? "IPv4 TLS" : "IPv6 TLS");
+#endif
+#ifdef _WIN32
+    if (family == AF_INET) {
+        reinterpret_cast<sockaddr_in *>(&storage)->sin_port = 0;
+        check_connections(address, NULL, false, "Windows immediate failure", true);
+#ifdef USE_TLS
+        check_connections(address, NULL, true, "Windows TLS immediate failure", true);
+#endif
+    }
 #endif
     evutil_closesocket(listener);
 }

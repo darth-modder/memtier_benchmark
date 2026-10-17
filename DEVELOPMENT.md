@@ -126,10 +126,10 @@ $ make LDFLAGS=-static \
     LIBS='-lz -lcrypto -lws2_32 -lgdi32 -lcrypt32 -ladvapi32 -luser32 -liphlpapi -lws2_32'
 ```
 
-`make check` runs the portable unit programs on Windows, including TCP socket
-options, reconnect descriptor closure and TLS socket setup. The two fixtures
-that require Unix-domain sockets (`retry_drain_test` and
-`reconnect_siblings_test`) run only on POSIX.
+`make check` runs all 14 unit programs on Windows, including TCP socket
+options, reconnect descriptor closure, retry-drain and sibling-deadline
+regressions, and TLS socket setup. The Unix-domain portion of the socket
+options test runs only on POSIX.
 
 `tests/windows_smoke.py` runs end-to-end checks against a built
 executable without needing a Redis server (`python tests/windows_smoke.py
