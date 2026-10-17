@@ -331,6 +331,7 @@ public:
 
     void handle_reconnect_timer_event();
     void handle_connection_timeout_event();
+    void handle_unix_connect_retry();
 
     // Retry / replay machinery.
     void handle_retry_drain_event();
@@ -527,6 +528,7 @@ private:
 
     // Connection timeout tracking
     struct event *m_connection_timeout_timer;
+    struct event *m_unix_connect_timer;
 #ifdef _WIN32
     struct event *m_deferred_connect_error;
 #endif

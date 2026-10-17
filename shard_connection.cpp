@@ -128,6 +128,11 @@ void setup_rejected_check_cb(evutil_socket_t, short, void *ctx)
     static_cast<shard_connection *>(ctx)->handle_setup_rejected_check_event();
 }
 
+void unix_connect_retry_cb(evutil_socket_t, short, void *ctx)
+{
+    static_cast<shard_connection *>(ctx)->handle_unix_connect_retry();
+}
+
 void cluster_client_connection_timeout_handler(evutil_socket_t fd, short what, void *ctx)
 {
     shard_connection *sc = (shard_connection *) ctx;
@@ -303,6 +308,7 @@ shard_connection::shard_connection(unsigned int id, connections_manager *conns_m
         m_slots_rejected(false),
         m_slots_retried_after_run_over(false),
         m_connection_timeout_timer(NULL),
+        m_unix_connect_timer(NULL),
 #ifdef _WIN32
         m_deferred_connect_error(NULL),
 #endif
@@ -394,6 +400,11 @@ shard_connection::~shard_connection()
     if (m_connection_timeout_timer != NULL) {
         event_free(m_connection_timeout_timer);
         m_connection_timeout_timer = NULL;
+    }
+
+    if (m_unix_connect_timer != NULL) {
+        event_free(m_unix_connect_timer);
+        m_unix_connect_timer = NULL;
     }
 
     if (m_protocol != NULL) {
@@ -665,12 +676,32 @@ int shard_connection::connect(struct connect_info *addr)
     int ret = bufferevent_socket_connect(m_bev, sa, socklen);
 #endif
     if (ret == -1) {
-        // Read the error before disconnect() can overwrite it.
-        int err = EVUTIL_SOCKET_ERROR();
-        disconnect();
-
-        benchmark_error_log("connect failed, error = %s\n", evutil_socket_error_to_string(err));
-        return -1;
+        const int error = EVUTIL_SOCKET_ERROR();
+        // A full Unix listener backlog returns EAGAIN without starting a
+        // connection. Wait between attempts so the worker and supervisor can
+        // still run. TCP EINPROGRESS is already handled by libevent.
+#ifndef _WIN32
+        if (m_unix_sockaddr != NULL && (error == EAGAIN || error == EWOULDBLOCK)) {
+            // In particular, the SSL bufferevent must not try its handshake
+            // on an unconnected, writable socket while the backlog is full.
+            bufferevent_disable(m_bev, EV_READ | EV_WRITE);
+            // This is still one pending connect, not a failed reconnect
+            // attempt: EAGAIN must not consume --max-reconnect-attempts.
+            benchmark_debug_log("Unix socket listen queue full, waiting to connect\n");
+            struct timeval delay = {0, 10000};
+            m_unix_connect_timer = event_new(m_event_base, -1, EV_PERSIST, unix_connect_retry_cb, this);
+            if (m_unix_connect_timer == NULL || event_add(m_unix_connect_timer, &delay) != 0) {
+                disconnect();
+                benchmark_error_log("error: failed to schedule Unix socket connect retry\n");
+                return -1;
+            }
+        } else
+#endif
+        {
+            disconnect();
+            benchmark_error_log("connect failed, error = %s\n", evutil_socket_error_to_string(error));
+            return -1;
+        }
     }
 
     // A pending reconnect is moot once something else (e.g. a shard's
@@ -699,6 +730,31 @@ int shard_connection::connect(struct connect_info *addr)
     }
 
     return 0;
+}
+
+// Continue the same connect attempt: do not rearm its connection timeout.
+void shard_connection::handle_unix_connect_retry()
+{
+    // Apply the same timed-run policy as a failed asynchronous connect.
+    if (stops_at_deadline() && run_deadline_passed()) {
+        event_free(m_unix_connect_timer);
+        m_unix_connect_timer = NULL;
+        attempt_reconnect("Unix socket listen queue still full at run deadline");
+        return;
+    }
+    if (bufferevent_socket_connect(m_bev, (struct sockaddr *) m_unix_sockaddr, m_unix_sockaddrlen) == 0) {
+        event_free(m_unix_connect_timer);
+        m_unix_connect_timer = NULL;
+        bufferevent_enable(m_bev, EV_READ | EV_WRITE);
+        return;
+    }
+    const int error = errno;
+    if (error == EAGAIN || error == EWOULDBLOCK) return;
+
+    event_free(m_unix_connect_timer);
+    m_unix_connect_timer = NULL;
+    benchmark_error_log("connect failed, error = %s\n", strerror(error));
+    attempt_reconnect("Unix socket connect failed");
 }
 
 // Log a request memtier gives up on, without a reply, to --failed-keys-file.
@@ -734,6 +790,11 @@ void shard_connection::disconnect()
     if (m_connection_timeout_timer != NULL) {
         event_free(m_connection_timeout_timer);
         m_connection_timeout_timer = NULL;
+    }
+
+    if (m_unix_connect_timer != NULL) {
+        event_free(m_unix_connect_timer);
+        m_unix_connect_timer = NULL;
     }
 
     // Drain pipeline. With --retry-on-error, move in-flight requests into the
