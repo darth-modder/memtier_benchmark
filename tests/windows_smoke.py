@@ -16,6 +16,7 @@ import ctypes
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,30 @@ def unused_port():
         return probe.getsockname()[1]
 
 
+class TLSCommandSink(RESPCommandSink):
+    def __init__(self, context):
+        super().__init__()
+        self.context = context
+
+    def _serve(self, connection):
+        original = connection
+        try:
+            connection.settimeout(5)
+            connection = self.context.wrap_socket(connection, server_side=True)
+            connection.settimeout(None)
+            with self._condition:
+                self._connections.discard(original)
+                self._connections.add(connection)
+            super()._serve(connection)
+        except Exception as error:
+            self._record_error("TLS connection failed: {}".format(error))
+            connection.close()
+            with self._condition:
+                self._connections.discard(original)
+                self._connections.discard(connection)
+                self._condition.notify_all()
+
+
 class WindowsSmokeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -81,6 +106,44 @@ class WindowsSmokeTests(unittest.TestCase):
             self.assertEqual(stats["Sets"]["Count"], 4000)
             self.assertEqual(stats["Gets"]["Count"], 0)
             self.assertEqual(sink.request_count, 4000)
+
+    def test_pipeline_reconnect(self):
+        with RESPCommandSink() as sink:
+            stats = self.run_against_sink(sink, "-t", "2", "-c", "2", "-n", "100",
+                                          "--ratio=1:0", "--pipeline=4", "--reconnect-interval=20")
+            self.assertEqual(stats["Sets"]["Count"], 400)
+            self.assertEqual(sink.request_count, 400)
+
+    def test_tls_reconnect(self):
+        cert = os.path.join(self.tmp.name, "cert.pem")
+        key = os.path.join(self.tmp.name, "key.pem")
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                        "-subj", "/CN=localhost", "-keyout", key, "-out", cert],
+                       check=True, capture_output=True, timeout=30)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        with TLSCommandSink(context) as sink:
+            stats = self.run_against_sink(sink, "-t", "1", "-c", "2", "-n", "100",
+                                          "--ratio=1:0", "--pipeline=4", "--reconnect-interval=20",
+                                          "--tls", "--tls-skip-verify")
+            self.assertEqual(stats["Sets"]["Count"], 200)
+            self.assertEqual(sink.request_count, 200)
+
+    def test_output_prefix_directory(self):
+        prefix = os.path.join(self.tmp.name, "histogram")
+        with RESPCommandSink() as sink:
+            stats = self.run_against_sink(sink, "-t", "1", "-c", "1", "-n", "20",
+                                          "--ratio=1:0", "--hdr-file-prefix=" + prefix)
+            self.assertEqual(stats["Sets"]["Count"], 20)
+        self.assertTrue(any(name.startswith("histogram") for name in os.listdir(self.tmp.name)))
+
+    def test_invalid_output_directory_fails_before_requests(self):
+        with RESPCommandSink() as sink:
+            result = run_memtier("-s", sink.host, "-p", str(sink.port), "-t", "1", "-c", "1", "-n", "1",
+                                 "--hdr-file-prefix=" + os.path.join(self.tmp.name, "missing", "histogram"))
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("cannot write --hdr-file-prefix directory", result.stderr)
+            self.assertEqual(sink.request_count, 0)
 
     def test_timed_run_reports_cpu_usage(self):
         with RESPCommandSink() as sink:

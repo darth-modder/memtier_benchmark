@@ -82,9 +82,9 @@ memtier_benchmark_LDADD = \
 
 
 check_PROGRAMS = prometheus_metrics_test rate_limiter_test retry_backoff_test keylist_growth_test hdr_histogram_test cluster_transaction_test \
-    cluster_hslot_test run_stats_counters_test run_stats_merge_test crash_report_test
+    cluster_hslot_test run_stats_counters_test run_stats_merge_test crash_report_test socket_options_test
 if !MEMTIER_WINDOWS
-check_PROGRAMS += retry_drain_test socket_options_test reconnect_siblings_test
+check_PROGRAMS += retry_drain_test reconnect_siblings_test
 endif
 
 # The metrics test links only the pure layer (prometheus_metrics.{h,cpp}, utf8.{h,cpp}).

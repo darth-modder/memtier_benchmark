@@ -90,7 +90,7 @@ environment (GCC 16.2, libevent 2.1.13, OpenSSL 3.6). In an MSYS2 shell,
 install the prerequisites:
 
 ```
-$ pacman -S --needed autoconf-wrapper automake-wrapper libtool make git \
+$ pacman -S --needed autoconf-wrapper automake-wrapper make git \
     mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf \
     mingw-w64-ucrt-x86_64-libevent mingw-w64-ucrt-x86_64-openssl \
     mingw-w64-ucrt-x86_64-zlib mingw-w64-ucrt-x86_64-python
@@ -122,11 +122,16 @@ with:
 
 ```
 $ rm memtier_benchmark.exe
-$ make LDFLAGS=-all-static \
+$ make LDFLAGS=-static \
     LIBS='-lz -lcrypto -lws2_32 -lgdi32 -lcrypt32 -ladvapi32 -luser32 -liphlpapi -lws2_32'
 ```
 
-`tests/windows_smoke.py` runs a few end-to-end checks against a built
+`make check` runs the portable unit programs on Windows, including TCP socket
+options, reconnect descriptor closure and TLS socket setup. The two fixtures
+that require Unix-domain sockets (`retry_drain_test` and
+`reconnect_siblings_test`) run only on POSIX.
+
+`tests/windows_smoke.py` runs end-to-end checks against a built
 executable without needing a Redis server (`python tests/windows_smoke.py
 ./memtier_benchmark.exe`). The RLTest integration suite is not run in CI on
 Windows. It can be run locally against a Windows Redis-compatible server such

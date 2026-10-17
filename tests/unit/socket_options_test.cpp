@@ -22,21 +22,22 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <netinet/in.h>
+#include "platform_compat.h"
+#include <event2/util.h>
+#ifndef _WIN32
 #include <netinet/tcp.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 // Record the real descriptor without exposing production internals or replacing
 // socket option calls. Only this translation unit's socket() calls are wrapped;
 // libevent and the listeners below continue to use the normal system function.
-static int observed_socket = -1;
+static evutil_socket_t observed_socket = -1;
 static unsigned int socket_creations = 0;
-static int recording_socket(int domain, int type, int protocol)
+static evutil_socket_t recording_socket(int domain, int type, int protocol)
 {
     observed_socket = ::socket(domain, type, protocol);
     ++socket_creations;
@@ -88,12 +89,12 @@ static bool check(bool condition, const char *context, const char *requirement)
     return condition;
 }
 
-static void check_option(int fd, int level, int option, const char *context, const char *name)
+static void check_option(evutil_socket_t fd, int level, int option, const char *context, const char *name)
 {
     int value = -1;
     socklen_t len = sizeof(value);
     // Boolean socket options need only be nonzero: BSD can return a bit mask.
-    if (check(getsockopt(fd, level, option, &value, &len) == 0, context, name) && value == 0) {
+    if (check(getsockopt(fd, level, option, (char *) &value, &len) == 0, context, name) && value == 0) {
         fprintf(stderr, "FAIL [%s]: %s = 0, expected enabled\n", context, name);
         ++failures;
     }
@@ -143,15 +144,18 @@ static void check_connections(struct connect_info &address, const char *unix_pat
             unsigned int before = socket_creations;
             if (!check(connection.connect(&address) == 0, label, "connect succeeds")) break;
             check(socket_creations == before + 1, label, "connect creates a new socket");
-            int fd = observed_socket;
+            evutil_socket_t fd = observed_socket;
+#ifndef _WIN32
             int flags = fcntl(fd, F_GETFL, 0);
             check(flags >= 0 && (flags & O_NONBLOCK), label, "O_NONBLOCK enabled");
+#endif
             if (unix_path == NULL) {
                 check_option(fd, SOL_SOCKET, SO_KEEPALIVE, label, "SO_KEEPALIVE");
                 check_option(fd, IPPROTO_TCP, TCP_NODELAY, label, "TCP_NODELAY");
                 struct linger linger_value = {};
                 socklen_t len = sizeof(linger_value);
-                if (check(getsockopt(fd, SOL_SOCKET, SO_LINGER, &linger_value, &len) == 0, label, "SO_LINGER")) {
+                if (check(getsockopt(fd, SOL_SOCKET, SO_LINGER, (char *) &linger_value, &len) == 0, label,
+                          "SO_LINGER")) {
                     check(linger_value.l_onoff != 0 && linger_value.l_linger == 0, label, "abortive close enabled");
                 }
             }
@@ -165,8 +169,16 @@ static void check_connections(struct connect_info &address, const char *unix_pat
             connection.disconnect();
             // libevent can defer bufferevent destruction until the loop runs.
             event_base_loop(base, EVLOOP_NONBLOCK);
+#ifdef _WIN32
+            int value;
+            int len = sizeof(value);
+            check(getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (char *) &value, &len) == SOCKET_ERROR &&
+                      WSAGetLastError() == WSAENOTSOCK,
+                  label, "disconnect closes socket");
+#else
             errno = 0;
             check(fcntl(fd, F_GETFD) == -1 && errno == EBADF, label, "disconnect closes socket");
+#endif
         }
     }
     delete protocol;
@@ -179,7 +191,7 @@ static void check_connections(struct connect_info &address, const char *unix_pat
 static void test_tcp(int family)
 {
     const char *label = family == AF_INET ? "IPv4" : "IPv6";
-    int listener = socket(family, SOCK_STREAM, IPPROTO_TCP);
+    evutil_socket_t listener = socket(family, SOCK_STREAM, IPPROTO_TCP);
     if (listener < 0 && family == AF_INET6 && (errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT)) {
         printf("SKIP IPv6: address family is unavailable\n");
         return;
@@ -201,14 +213,14 @@ static void test_tcp(int family)
     int result = bind(listener, reinterpret_cast<sockaddr *>(&storage), len);
     if (result < 0 && family == AF_INET6 && errno == EADDRNOTAVAIL) {
         printf("SKIP IPv6: loopback is unavailable\n");
-        close(listener);
+        evutil_closesocket(listener);
         return;
     }
     if (!check(result == 0, label, "bind loopback listener") ||
         !check(getsockname(listener, reinterpret_cast<sockaddr *>(&storage), &len) == 0, label,
                "get listener address") ||
         !check(listen(listener, 16) == 0, label, "listen")) {
-        close(listener);
+        evutil_closesocket(listener);
         return;
     }
     connect_info address = {};
@@ -221,9 +233,10 @@ static void test_tcp(int family)
 #ifdef USE_TLS
     check_connections(address, NULL, true, family == AF_INET ? "IPv4 TLS" : "IPv6 TLS");
 #endif
-    close(listener);
+    evutil_closesocket(listener);
 }
 
+#ifndef _WIN32
 static void test_unix()
 {
     char directory[] = "/tmp/memtier-socket-test-XXXXXX";
@@ -231,7 +244,7 @@ static void test_unix()
     sockaddr_un address = {};
     address.sun_family = AF_UNIX;
     snprintf(address.sun_path, sizeof(address.sun_path), "%s/socket", directory);
-    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    evutil_socket_t listener = socket(AF_UNIX, SOCK_STREAM, 0);
     if (check(listener >= 0, "Unix", "create listener")) {
         if (check(bind(listener, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0, "Unix",
                   "bind listener") &&
@@ -239,20 +252,28 @@ static void test_unix()
             connect_info unused = {};
             check_connections(unused, address.sun_path, false, "Unix");
         }
-        close(listener);
+        evutil_closesocket(listener);
     }
     unlink(address.sun_path);
     rmdir(directory);
 }
 
+#endif
+
 int main()
 {
+#ifdef _WIN32
+    WSADATA data;
+    if (!check(WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock", "startup")) return 1;
+#endif
 #if defined(USE_TLS) && OPENSSL_VERSION_NUMBER < 0x10100000L
     SSL_library_init();
 #endif
     test_tcp(AF_INET);
     test_tcp(AF_INET6);
+#ifndef _WIN32
     test_unix();
+#endif
     if (failures != 0) {
         fprintf(stderr, "%d socket option check(s) failed\n", failures);
         return 1;
