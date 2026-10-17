@@ -1036,7 +1036,7 @@ bool shard_connection::enqueue_retry(request *req)
     struct timeval delay;
     delay.tv_sec = (long) (ms / 1000.0);
     delay.tv_usec = (long) ((ms - delay.tv_sec * 1000.0) * 1000.0);
-    timeradd(&now, &delay, &req->m_retry_due);
+    evutil_timeradd(&now, &delay, &req->m_retry_due);
 
     bool had_queued = !m_retry_queue->empty();
     req->m_claimed_by_retry = true;
@@ -1065,7 +1065,7 @@ bool shard_connection::enqueue_retry(request *req)
 void shard_connection::arm_retry_drain_timer(const struct timeval &due, const struct timeval &now)
 {
     struct timeval delay = {0, 0};
-    if (timercmp(&due, &now, >)) timersub(&due, &now, &delay);
+    if (timercmp(&due, &now, >)) evutil_timersub(&due, &now, &delay);
     m_retry_timer_due = due;
     // Replaces the timeout if the timer is already pending.
     event_add(m_retry_drain_timer, &delay);
@@ -1112,7 +1112,7 @@ void shard_connection::handle_retry_drain_event()
     struct timeval now, horizon;
     struct timeval slack = {0, 1000};
     retry_clock_now(&now);
-    timeradd(&now, &slack, &horizon);
+    evutil_timeradd(&now, &slack, &horizon);
     bool have_next = false;
     struct timeval next = {0, 0};
     for (size_t n = m_retry_queue->size(); n > 0 && !m_retry_queue->empty(); n--) {
@@ -2135,7 +2135,7 @@ bool shard_connection::run_deadline_passed(void)
     struct timeval deadline, now, slack = {0, 1000};
     if (!run_deadline(&deadline)) return false;
     gettimeofday(&now, NULL);
-    timeradd(&now, &slack, &now);
+    evutil_timeradd(&now, &slack, &now);
     return !timercmp(&now, &deadline, <);
 }
 
