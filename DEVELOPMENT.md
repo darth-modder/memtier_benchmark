@@ -126,7 +126,7 @@ $ make LDFLAGS=-static \
     LIBS='-lz -lcrypto -lws2_32 -lgdi32 -lcrypt32 -ladvapi32 -luser32 -liphlpapi -lws2_32'
 ```
 
-`make check` runs all 14 unit programs on Windows, including TCP socket
+`make check` runs all unit programs on Windows, including TCP socket
 options, reconnect descriptor closure, retry-drain and sibling-deadline
 regressions, and TLS socket setup. The Unix-domain portion of the socket
 options test runs only on POSIX.
