@@ -82,7 +82,7 @@ memtier_benchmark_LDADD = \
 
 
 check_PROGRAMS = prometheus_metrics_test rate_limiter_test retry_backoff_test keylist_growth_test hdr_histogram_test cluster_transaction_test \
-    cluster_hslot_test run_stats_counters_test run_stats_merge_test crash_report_test socket_options_test retry_drain_test reconnect_siblings_test
+    cluster_hslot_test run_stats_counters_test run_stats_merge_test crash_report_test socket_options_test retry_drain_test reconnect_siblings_test memcache_meta_test
 
 # The metrics test links only the pure layer (prometheus_metrics.{h,cpp}, utf8.{h,cpp}).
 # First `make check` program in the repo. The metrics layer is config-free and
@@ -100,6 +100,12 @@ if MEMTIER_WINDOWS
 # and only under this feature macro. That is enough for this test's use of it.
 prometheus_metrics_test_CPPFLAGS += -D_POSIX_THREAD_SAFE_FUNCTIONS
 endif
+
+memcache_meta_test_SOURCES = tests/unit/memcache_meta_test.cpp protocol.cpp protocol.h
+memcache_meta_test_CPPFLAGS = -I$(srcdir) $(memtier_benchmark_CPPFLAGS)
+memcache_meta_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g
+memcache_meta_test_LDADD = $(memtier_benchmark_LDADD)
+
 rate_limiter_test_SOURCES = tests/unit/rate_limiter_test.cpp rate_limiter.h
 rate_limiter_test_CPPFLAGS = -I$(srcdir)
 rate_limiter_test_CXXFLAGS = -std=c++11 -Wall -Werror=vla -g

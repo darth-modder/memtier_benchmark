@@ -21,8 +21,11 @@
 #endif
 
 #include <stdlib.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <deque>
 #ifdef HAVE_ASSERT_H
 #include <assert.h>
 #endif
@@ -1278,6 +1281,299 @@ int memcache_text_protocol::write_arbitrary_command(const char *val, int val_len
 }
 
 /////////////////////////////////////////////////////////////////////////
+//
+// Memcache Meta Protocol (memcached 1.6.10+).
+//
+// The meta protocol is a compact, flag-based ASCII protocol that supersedes
+// the classic text protocol. We implement just enough to drive a representative
+// SET / GET / multi-GET benchmark:
+//
+//   ms <key> <datalen> T<exp>\r\n<data>\r\n   ->  HD | NS | EX | NF
+//   mg <key> v\r\n                            ->  VA <size>\r\n<data>\r\n | EN
+//   <pipelined mg ...> mn\r\n                 ->  ...VA/EN..., MN  (multi-get)
+//
+// Inheriting from memcache_text_protocol lets us share the read/write buffers
+// and the methods that are also unsupported on the text path
+// (select_db / authenticate / configure_protocol / write_command_cluster_slots /
+// write_command_wait / *arbitrary_command -- all assert(0)). Meta overrides
+// its command writers, parser and reconnect reset.
+//
+// IMPORTANT design choice -- every command is terminated on the wire by `mn`,
+// the meta protocol's no-op:
+//   ms <k> <l> T<e>\r\n<data>\r\nmn\r\n   ->  HD\r\nMN\r\n
+//   mg <k> v\r\nmn\r\n                  ->  VA <n>\r\n<data>\r\nMN\r\n  (or EN\r\nMN\r\n)
+//   <pipelined mg ...> mn\r\n            ->  ...VA/EN..., MN  (mn is the natural terminator)
+//
+// The ordered expectation queue validates reply kinds and exact section counts;
+// MN then marks the end of each logical request, including errors and multi-get.
+// Keeping this boundary uniform is a deliberate wire-format choice, not a
+// requirement of the queue. Single-key operations could omit mn in another mode.
+// Each logical operation includes one extra server command and 4 request +
+// 4 response bytes; its processing overhead depends on the workload.
+class memcache_meta_protocol : public memcache_text_protocol
+{
+    struct expected_reply
+    {
+        bool get;
+        unsigned int remaining;
+    };
+    // Validate before returning a completed response to shard_connection.
+    // Raw serialized retries must restore this metadata through the replay hook.
+    std::deque<expected_reply> m_expected_replies;
+
+public:
+    memcache_meta_protocol() {}
+    virtual memcache_meta_protocol *clone(void) { return new memcache_meta_protocol(); }
+    virtual void prepare_request_replay(bool is_get, unsigned int keys)
+    {
+        m_expected_replies.push_back({is_get, is_get ? keys : 1});
+    }
+    virtual void reset_state()
+    {
+        abstract_protocol::reset_state();
+        m_response_state = rs_initial;
+        m_value_len = 0;
+        m_response_len = 0;
+        m_expected_replies.clear();
+    }
+
+    virtual int write_command_set(const char *key, int key_len, const char *value, int value_len, int expiry,
+                                  unsigned int offset);
+    virtual int write_command_get(const char *key, int key_len, unsigned int offset);
+    virtual int write_command_multi_get(const keylist *keylist);
+    virtual int parse_response(void);
+};
+
+// Header / trailer literals factored out so that:
+//   (a) `mg ... v\r\n` is built with three raw `evbuffer_add` calls instead of
+//       a `vsnprintf`-driven `evbuffer_add_printf`. libevent appends each piece
+//       to the tail chain as a single memcpy, which matches the existing
+//       memcache_text_protocol multi-get write path.
+//   (b) Trailer length is shared between get / multi-get so the math is
+//       impossible to drift.
+static const char k_mg_prefix[] = "mg ";
+static const char k_mg_suffix[] = " v\r\n";
+static const char k_mn_term[] = "mn\r\n";
+static const size_t k_mg_prefix_len = sizeof(k_mg_prefix) - 1; // "mg "
+static const size_t k_mg_suffix_len = sizeof(k_mg_suffix) - 1; // " v\r\n"
+static const size_t k_mn_term_len = sizeof(k_mn_term) - 1;     // "mn\r\n"
+
+int memcache_meta_protocol::write_command_set(const char *key, int key_len, const char *value, int value_len,
+                                              int expiry, unsigned int offset)
+{
+    assert(key != NULL);
+    assert(key_len > 0);
+    assert(value != NULL);
+    assert(value_len > 0);
+
+    // `ms <key> <datalen> T<exp>\r\n<value>\r\nmn\r\n`. The trailing mn makes
+    // every command's response self-terminating at MN. The expectation queue
+    // also validates that this section is a storage reply.
+    int size = evbuffer_add_printf(m_write_buf, "ms %.*s %u T%u\r\n", key_len, key, (unsigned int) value_len, expiry);
+    evbuffer_add(m_write_buf, value, value_len);
+    evbuffer_add(m_write_buf, "\r\n", 2);
+    evbuffer_add(m_write_buf, k_mn_term, k_mn_term_len);
+    m_expected_replies.push_back({false, 1});
+    return size + value_len + 2 + (int) k_mn_term_len;
+}
+
+int memcache_meta_protocol::write_command_get(const char *key, int key_len, unsigned int offset)
+{
+    assert(key != NULL);
+    assert(key_len > 0);
+    evbuffer_add(m_write_buf, k_mg_prefix, k_mg_prefix_len);
+    evbuffer_add(m_write_buf, key, key_len);
+    evbuffer_add(m_write_buf, k_mg_suffix, k_mg_suffix_len);
+    evbuffer_add(m_write_buf, k_mn_term, k_mn_term_len);
+    m_expected_replies.push_back({true, 1});
+    return (int) (k_mg_prefix_len + key_len + k_mg_suffix_len + k_mn_term_len);
+}
+
+int memcache_meta_protocol::write_command_multi_get(const keylist *keylist)
+{
+    assert(keylist != NULL);
+    assert(keylist->get_keys_count() > 0);
+
+    int size = 0;
+    for (unsigned int i = 0; i < keylist->get_keys_count(); i++) {
+        unsigned int key_len;
+        const char *key = keylist->get_key(i, &key_len);
+        assert(key != NULL);
+        evbuffer_add(m_write_buf, k_mg_prefix, k_mg_prefix_len);
+        evbuffer_add(m_write_buf, key, key_len);
+        evbuffer_add(m_write_buf, k_mg_suffix, k_mg_suffix_len);
+        size += (int) (k_mg_prefix_len + key_len + k_mg_suffix_len);
+    }
+    // Single mn at the end of the pipeline -- one terminator covers all keys
+    // in this multi-get logical request, mirroring the per-command `mn`
+    // suffix used by ms / mg above.
+    evbuffer_add(m_write_buf, k_mn_term, k_mn_term_len);
+    m_expected_replies.push_back({true, keylist->get_keys_count()});
+    return size + (int) k_mn_term_len;
+}
+
+int memcache_meta_protocol::parse_response(void)
+{
+    char *line;
+    size_t tmplen;
+
+    while (true) {
+        switch (m_response_state) {
+        case rs_initial:
+            m_last_response.clear();
+            m_response_state = rs_read_section;
+            m_response_len = 0;
+            break;
+
+        case rs_read_section: {
+            line = evbuffer_readln(m_read_buf, &tmplen, EVBUFFER_EOL_CRLF_STRICT);
+            if (!line) return 0;
+
+            m_response_len += tmplen + 2; // For CRLF
+            // Adopt the first status; a later defined error replaces it so
+            // error accounting/retry sees the error rather than a prior hit.
+            if (m_last_response.get_status() == NULL) {
+                m_last_response.set_status(line);
+            }
+            m_last_response.set_total_len((unsigned int) m_response_len);
+
+            // Decode the section header. Meta has very few shapes:
+            //   VA <size> [<flags>...]   value follows on the next line
+            //   MN                       end of a multi-op pipeline
+            //   HD | EN | NS | EX | NF   2-letter status (stored / miss / not-stored / exists / not-found)
+            bool need_value = false;
+            bool done = false;
+            bool unknown = false;
+            bool server_error = false;
+
+            if (memchr(line, '\0', tmplen) != NULL) {
+                unknown = true;
+            } else if ((tmplen == 5 && memcmp(line, "ERROR", 5) == 0) ||
+                       (tmplen >= 12 && (tmplen == 12 || line[12] == ' ') &&
+                        (memcmp(line, "CLIENT_ERROR", 12) == 0 || memcmp(line, "SERVER_ERROR", 12) == 0))) {
+                // Every command may return a defined error instead of its
+                // normal section. Retain the first error even if an earlier
+                // MGET section supplied a valid status, and still drain to MN.
+                server_error = true;
+                if (!m_last_response.is_error() && m_last_response.get_status() != line)
+                    m_last_response.set_status(line);
+                m_last_response.set_error();
+            } else if (tmplen >= 3 && memcmp(line, "VA ", 3) == 0) {
+                // Parse the value size with strtoul rather than sscanf -- on
+                // the GET hot path this avoids the full stdio scanner machinery
+                // (locale, format-string re-parse) for what is just a single
+                // unsigned integer immediately following a fixed prefix.
+                char *endptr = NULL;
+                errno = 0;
+                unsigned long v = strtoul(line + 3, &endptr, 10);
+                // evbuffer_remove returns int; reject sizes that cannot be
+                // represented, signs, missing digits and partial number tokens.
+                if (line[3] < '0' || line[3] > '9' || errno == ERANGE || v > INT_MAX ||
+                    (*endptr != '\0' && *endptr != ' ')) {
+                    unknown = true;
+                } else {
+                    m_value_len = (unsigned int) v;
+                    need_value = true;
+                }
+            } else if (tmplen == 2 && memcmp(line, "MN", 2) == 0) {
+                // MN is the universal response terminator. Every command we
+                // write ends in `mn\r\n`, so every response ends with `MN`.
+                done = m_last_response.get_status() != line;
+                unknown = !done; // A terminator alone is not a command reply.
+            } else if (tmplen >= 2 && (tmplen == 2 || line[2] == ' ') &&
+                       (memcmp(line, "HD", 2) == 0 || memcmp(line, "EN", 2) == 0 || memcmp(line, "NS", 2) == 0 ||
+                        memcmp(line, "EX", 2) == 0 || memcmp(line, "NF", 2) == 0)) {
+                // 2-letter status: stored / miss / not-stored / exists / not-found.
+                // Always intermediate -- we keep reading until MN.
+            } else {
+                unknown = true;
+            }
+
+            // Non-quiet mg returns exactly one VA/EN per key, while ms
+            // returns one storage status. Keep expectations in issue order:
+            // a single mutable mode cannot describe mixed pipelined requests.
+            if (!unknown) {
+                if (m_expected_replies.empty()) {
+                    unknown = true;
+                } else if (done) {
+                    unknown = m_expected_replies.front().remaining != 0;
+                } else {
+                    expected_reply &expected = m_expected_replies.front();
+                    bool get_reply = need_value || memcmp(line, "EN", 2) == 0;
+                    unknown = expected.remaining == 0 || (!server_error && expected.get != get_reply);
+                    if (!unknown) --expected.remaining;
+                }
+            }
+
+            if (unknown) benchmark_debug_log("invalid meta response: %s\n", line);
+            // Free `line` if it wasn't adopted as status.
+            if (m_last_response.get_status() != line) free(line);
+
+            if (unknown) {
+                m_last_response.set_error();
+                // Reset state so the connection (reused by shard_connection)
+                // starts cleanly on the next call.
+                m_response_state = rs_initial;
+                return -1;
+            }
+            if (need_value) {
+                m_response_state = rs_read_value;
+                continue;
+            }
+            if (done) {
+                m_response_state = rs_read_end;
+            }
+            // else: 2-letter status -- keep reading sections until MN.
+            break;
+        }
+
+        case rs_read_value:
+            if (evbuffer_get_length(m_read_buf) < (size_t) m_value_len + 2) return 0;
+            if (m_keep_value) {
+                char *value = (char *) malloc(m_value_len ? m_value_len : 1);
+                if (value == NULL) {
+                    m_last_response.set_error();
+                    m_response_state = rs_initial;
+                    return -1;
+                }
+                int ret = evbuffer_remove(m_read_buf, value, m_value_len);
+                assert(ret == (int) m_value_len);
+                m_last_response.set_value(value, m_value_len);
+            } else {
+                int ret = evbuffer_drain(m_read_buf, m_value_len);
+                assert(ret == 0);
+            }
+            {
+                char ending[2];
+                int ret = evbuffer_remove(m_read_buf, ending, sizeof(ending));
+                if (ret != 2 || ending[0] != '\r' || ending[1] != '\n') {
+                    m_last_response.set_error();
+                    m_response_state = rs_initial;
+                    return -1;
+                }
+            }
+            m_last_response.incr_hits();
+            m_response_len += m_value_len + 2;
+            // Always go back to read more sections; the response only ends at MN.
+            m_response_state = rs_read_section;
+            break;
+
+        case rs_read_end:
+            m_expected_replies.pop_front();
+            m_response_state = rs_initial;
+            return 1;
+
+        default:
+            benchmark_debug_log("unknown response state %d.\n", m_response_state);
+            m_response_state = rs_initial;
+            return -1;
+        }
+    }
+
+    return -1;
+}
+
+/////////////////////////////////////////////////////////////////////////
 
 class memcache_binary_protocol : public abstract_protocol
 {
@@ -1577,6 +1873,8 @@ class abstract_protocol *protocol_factory(enum PROTOCOL_TYPE type)
         return new memcache_text_protocol();
     } else if (type == PROTOCOL_MEMCACHE_BINARY) {
         return new memcache_binary_protocol();
+    } else if (type == PROTOCOL_MEMCACHE_META) {
+        return new memcache_meta_protocol();
     } else {
         benchmark_error_log("Error: unknown protocol type: %d.\n", type);
         return NULL;

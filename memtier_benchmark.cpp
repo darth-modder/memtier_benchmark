@@ -880,6 +880,8 @@ static const char *get_protocol_name(enum PROTOCOL_TYPE type)
         return "memcache_text";
     else if (type == PROTOCOL_MEMCACHE_BINARY)
         return "memcache_binary";
+    else if (type == PROTOCOL_MEMCACHE_META)
+        return "memcache_meta";
     else
         return "none";
 }
@@ -2055,9 +2057,11 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
                 cfg->protocol = PROTOCOL_MEMCACHE_TEXT;
             } else if (strcmp(optarg, "memcache_binary") == 0) {
                 cfg->protocol = PROTOCOL_MEMCACHE_BINARY;
+            } else if (strcmp(optarg, "memcache_meta") == 0) {
+                cfg->protocol = PROTOCOL_MEMCACHE_META;
             } else {
-                fprintf(stderr, "error: supported protocols are 'memcache_text', 'memcache_binary', 'redis', 'resp2' "
-                                "and resp3'.\n");
+                fprintf(stderr, "error: supported protocols are 'memcache_text', 'memcache_binary', "
+                                "'memcache_meta', 'redis', 'resp2' and 'resp3'.\n");
                 return -1;
             }
             break;
@@ -3119,6 +3123,12 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
         return -1;
     }
 
+    if (cfg->protocol == PROTOCOL_MEMCACHE_META &&
+        (cfg->wait_ratio.is_defined() || cfg->arbitrary_commands->is_defined())) {
+        fprintf(stderr, "error: memcache_meta does not support --wait-ratio or --command.\n");
+        return -1;
+    }
+
 #ifdef HAVE_EVHTTP
     // Prometheus post-parse tail (PLAN.md section 5). Runs once, before
     // config_init_defaults, so a NULL bind-addr still means "unset" and the
@@ -3174,8 +3184,11 @@ void usage()
         "  -4, --ipv4                     Force IPv4 address resolution.\n"
         "  -6  --ipv6                     Force IPv6 address resolution.\n"
         "  -P, --protocol=PROTOCOL        Protocol to use (default: redis).\n"
-        "                                 other supported protocols are resp2, resp3, memcache_text and "
-        "memcache_binary.\n"
+        "                                 other supported protocols are resp2, resp3, memcache_text, "
+        "memcache_binary and memcache_meta.\n"
+        "                                 memcache_meta is the modern Memcached meta-command protocol "
+        "(memcached 1.6.10+).\n"
+        "                                 Each meta operation includes an mn no-op terminator.\n"
         "                                 when using one of resp2 or resp3 the redis protocol version will be set via "
         "HELLO command.\n"
         "  -a, --authenticate=CREDENTIALS Authenticate using specified credentials.\n"
@@ -5950,7 +5963,7 @@ int main(int argc, char *argv[])
     }
 
     if (cfg.authenticate) {
-        if (cfg.protocol == PROTOCOL_MEMCACHE_TEXT) {
+        if (cfg.protocol == PROTOCOL_MEMCACHE_TEXT || cfg.protocol == PROTOCOL_MEMCACHE_META) {
             fprintf(stderr, "error: authenticate can only be used with redis or memcache_binary.\n");
             usage();
         }
