@@ -385,6 +385,10 @@ private:
     // when neither is on.
     bool wants_request_key() const { return m_config->retry_on_error || m_config->failed_keys_file; }
 
+#ifdef _WIN32
+    static void deferred_connect_error_handler(evutil_socket_t, short, void *);
+    void cancel_deferred_connect_error();
+#endif
     void setup_event(evutil_socket_t sockfd);
     evutil_socket_t setup_socket(struct connect_info *addr);
     void set_readable_id();
@@ -523,6 +527,9 @@ private:
 
     // Connection timeout tracking
     struct event *m_connection_timeout_timer;
+#ifdef _WIN32
+    struct event *m_deferred_connect_error;
+#endif
 
     // Retry plumbing.
     //   m_retry_queue       requests waiting for backoff before resending

@@ -44,6 +44,23 @@ static evutil_socket_t recording_socket(int domain, int type, int protocol)
     return observed_socket;
 }
 
+#ifdef _WIN32
+static int injected_connect_error = 0;
+static unsigned int injected_connect_calls = 0;
+static unsigned int refused_callbacks = 0;
+static int refused_callback_error = 0;
+static int recording_connect(evutil_socket_t fd, const sockaddr *address, int length)
+{
+    if (injected_connect_error != 0) {
+        ++injected_connect_calls;
+        WSASetLastError(injected_connect_error);
+        return -1;
+    }
+    return ::connect(fd, address, length);
+}
+#define MEMTIER_TEST_CONNECT recording_connect
+#endif
+
 // Include the system socket declarations above before replacing the call name.
 #define socket recording_socket
 #include "shard_connection.cpp"
@@ -72,7 +89,15 @@ int failure_exit_code()
 // These main-owned helpers also appear in tests/fuzz/fuzz_stubs.cpp. That file's
 // object_generator stubs conflict with the real objects needed for client RTTI.
 void benchmark_log_file_line(int, const char *, unsigned int, const char *, ...) {}
-void benchmark_log(int, const char *, ...) {}
+void benchmark_log(int, const char *format, ...)
+{
+#ifdef _WIN32
+    if (injected_connect_error && strcmp(format, "Connection error: %s\n") == 0) {
+        ++refused_callbacks;
+        refused_callback_error = WSAGetLastError();
+    }
+#endif
+}
 bool is_redis_protocol(enum PROTOCOL_TYPE type)
 {
     return type == PROTOCOL_REDIS_DEFAULT || type == PROTOCOL_RESP2 || type == PROTOCOL_RESP3;
@@ -288,6 +313,83 @@ static void test_unix()
 
 #endif
 
+#ifdef _WIN32
+// Inject only the documented synchronous Winsock result. The real connection,
+// bufferevent (plain or TLS), deferred dispatch and teardown remain production
+// code. This does not claim a naturally occurring Windows network failure.
+static void test_synchronous_refusal(bool tls, int teardown)
+{
+    const char *label = tls ? "injected TLS refusal" : "injected plain refusal";
+    arbitrary_command_list commands;
+    benchmark_config config = {};
+    config.arbitrary_commands = &commands;
+    config.clients = config.threads = 1;
+    config.key_pattern = "S:S";
+    config.protocol = PROTOCOL_REDIS_DEFAULT;
+    config.reconnect_on_error = true;
+    config.max_reconnect_attempts = 3;
+    config.reconnect_backoff_factor = 10;
+#ifdef USE_TLS
+    if (tls) config.openssl_ctx = SSL_CTX_new(TLS_client_method());
+#endif
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(1); // injected connect never contacts this endpoint
+    connect_info endpoint = {};
+    endpoint.ci_family = AF_INET;
+    endpoint.ci_socktype = SOCK_STREAM;
+    endpoint.ci_protocol = IPPROTO_TCP;
+    endpoint.ci_addr = (sockaddr *) &address;
+    endpoint.ci_addrlen = sizeof(address);
+    event_base *base = event_base_new();
+    abstract_protocol *protocol = protocol_factory(config.protocol);
+    object_generator generator;
+    generator.set_data_size_fixed(1);
+    client *manager = new client(base, &config, protocol, &generator);
+    shard_connection *connection = manager->get_connections().front();
+    connection->set_address_port("127.0.0.1", "1");
+    injected_connect_error = WSAECONNREFUSED;
+    injected_connect_calls = refused_callbacks = 0;
+    refused_callback_error = 0;
+    check(connection->connect(&endpoint) == 0, label, "refusal is accepted for deferred dispatch");
+    check(injected_connect_calls == 1, label, "failed socket receives exactly one connect call");
+    check(refused_callbacks == 0 && !connection->is_reconnect_pending(), label, "callback is not inline");
+    evutil_socket_t fd = observed_socket;
+    if (teardown == 1) connection->disconnect();
+    if (teardown == 2) {
+        delete manager;
+        manager = NULL;
+        connection = NULL;
+    }
+    // Prove the original error survives unrelated Winsock calls before dispatch.
+    WSASetLastError(WSAENETUNREACH);
+    event_base_loop(base, EVLOOP_NONBLOCK);
+    event_base_loop(base, EVLOOP_NONBLOCK);
+    if (teardown == 0) {
+        check(refused_callbacks == 1, label, "exactly one deferred error callback");
+        check(refused_callback_error == WSAECONNREFUSED, label, "callback sees original refusal");
+        check(connection->is_reconnect_pending(), label, "refusal enters reconnect policy");
+        connection->disconnect();
+    } else {
+        check(refused_callbacks == 0, label, "teardown cancels pending callback");
+    }
+    int value, length = sizeof(value);
+    check(getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (char *) &value, &length) == SOCKET_ERROR &&
+              WSAGetLastError() == WSAENOTSOCK,
+          label, "owning bufferevent closes socket");
+    check(injected_connect_calls == 1, label, "dispatch does not reconnect the failed socket");
+    delete manager;
+    injected_connect_error = 0;
+    event_base_loop(base, EVLOOP_NONBLOCK);
+    delete protocol;
+    event_base_free(base);
+#ifdef USE_TLS
+    if (config.openssl_ctx != NULL) SSL_CTX_free(config.openssl_ctx);
+#endif
+}
+#endif
+
 int main()
 {
 #ifdef _WIN32
@@ -296,6 +398,14 @@ int main()
 #endif
 #if defined(USE_TLS) && OPENSSL_VERSION_NUMBER < 0x10100000L
     SSL_library_init();
+#endif
+#ifdef _WIN32
+    for (int teardown = 0; teardown != 3; ++teardown) {
+        test_synchronous_refusal(false, teardown);
+#ifdef USE_TLS
+        test_synchronous_refusal(true, teardown);
+#endif
+    }
 #endif
     test_tcp(AF_INET);
     test_tcp(AF_INET6);

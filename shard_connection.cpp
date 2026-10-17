@@ -303,6 +303,9 @@ shard_connection::shard_connection(unsigned int id, connections_manager *conns_m
         m_slots_rejected(false),
         m_slots_retried_after_run_over(false),
         m_connection_timeout_timer(NULL),
+#ifdef _WIN32
+        m_deferred_connect_error(NULL),
+#endif
         m_retry_queue(NULL),
         m_replay_queue(NULL),
         m_retry_drain_timer(NULL),
@@ -355,6 +358,9 @@ shard_connection::shard_connection(unsigned int id, connections_manager *conns_m
 
 shard_connection::~shard_connection()
 {
+#ifdef _WIN32
+    cancel_deferred_connect_error();
+#endif
     if (m_address != NULL) {
         free(m_address);
         m_address = NULL;
@@ -451,8 +457,31 @@ shard_connection::~shard_connection()
     }
 }
 
+#ifdef _WIN32
+void shard_connection::cancel_deferred_connect_error()
+{
+    if (m_deferred_connect_error != NULL) {
+        event_free(m_deferred_connect_error);
+        m_deferred_connect_error = NULL;
+    }
+}
+
+void shard_connection::deferred_connect_error_handler(evutil_socket_t, short, void *ctx)
+{
+    shard_connection *connection = static_cast<shard_connection *>(ctx);
+    connection->cancel_deferred_connect_error();
+    // Teardown and unrelated Winsock calls can replace the thread's error.
+    // Restore the original refused result immediately before its callback.
+    WSASetLastError(WSAECONNREFUSED);
+    cluster_client_event_handler(connection->m_bev, BEV_EVENT_ERROR, connection);
+}
+#endif
+
 void shard_connection::setup_event(evutil_socket_t sockfd)
 {
+#ifdef _WIN32
+    cancel_deferred_connect_error();
+#endif
     if (m_bev) {
         bufferevent_free(m_bev);
     }
@@ -543,19 +572,29 @@ evutil_socket_t shard_connection::setup_socket(struct connect_info *addr)
 // non-blocking connect() here and give libevent the in-flight socket (NULL
 // address), which then waits for the socket to become writable exactly as it
 // does after its own WSAEWOULDBLOCK; failures are reported through the event
-// callback as before. If connect() fails immediately with anything else, return
+// callback as before. Refusal is deferred separately below. For any other
+// immediate hard error, return
 // -1 without calling connect() a second time (as bufferevent_socket_connect()
 // with an address would); the caller reports the Winsock error, which is left
 // in place for it to read.
 static int bufferevent_connect_nonblocking(struct bufferevent *bev, evutil_socket_t sockfd, const struct sockaddr *sa,
                                            int socklen)
 {
-    if (::connect(sockfd, sa, socklen) == 0) {
+    // The unit fixture injects synchronous Winsock outcomes into this call.
+#ifndef MEMTIER_TEST_CONNECT
+    int result = ::connect(sockfd, sa, socklen);
+#else
+    int result = MEMTIER_TEST_CONNECT(sockfd, sa, socklen);
+#endif
+    if (result == 0) {
         return bufferevent_socket_connect(bev, NULL, 0);
     }
 
     // The errors libevent treats as "connect in progress" on Windows.
     int err = WSAGetLastError();
+    // libevent defers a synchronous refusal to its error callback, returning
+    // success to the caller. Preserve that distinction from other hard errors.
+    if (err == WSAECONNREFUSED) return 1;
     if (err == WSAEWOULDBLOCK || err == WSAEINTR || err == WSAEINPROGRESS || err == WSAEINVAL) {
         return bufferevent_socket_connect(bev, NULL, 0);
     }
@@ -607,6 +646,21 @@ int shard_connection::connect(struct connect_info *addr)
     int socklen = m_unix_sockaddr ? m_unix_sockaddrlen : addr->ci_addrlen;
 #ifdef _WIN32
     int ret = bufferevent_connect_nonblocking(m_bev, sockfd, sa, socklen);
+    if (ret == 1) {
+        // Do not enter the error callback during client preparation. This
+        // connection owns the queued event so disconnect/destruction cancels
+        // it, including the TLS bufferevent and its SSL ownership. event_new /
+        // event_active work with the existing libevent 2.0.10 minimum.
+        bufferevent_disable(m_bev, EV_READ | EV_WRITE);
+        m_deferred_connect_error = event_new(m_event_base, -1, 0, deferred_connect_error_handler, this);
+        if (m_deferred_connect_error == NULL) {
+            WSASetLastError(WSAENOBUFS);
+            ret = -1;
+        } else {
+            event_active(m_deferred_connect_error, EV_TIMEOUT, 0);
+            ret = 0;
+        }
+    }
 #else
     int ret = bufferevent_socket_connect(m_bev, sa, socklen);
 #endif
@@ -657,6 +711,9 @@ static void log_abandoned_request(const request *req, const char *reason)
 
 void shard_connection::disconnect()
 {
+#ifdef _WIN32
+    cancel_deferred_connect_error();
+#endif
     if (m_bev) {
         bufferevent_free(m_bev);
         m_bev = NULL;
