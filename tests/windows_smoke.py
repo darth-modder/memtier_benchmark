@@ -107,6 +107,19 @@ class WindowsSmokeTests(unittest.TestCase):
             self.assertEqual(stats["Gets"]["Count"], 0)
             self.assertEqual(sink.request_count, 4000)
 
+    def test_monitor_input_long_final_line(self):
+        # Cross the Windows getline shim's initial 128-byte allocation and
+        # several reallocations; its final line must also work without a LF.
+        monitor_path = os.path.join(self.tmp.name, "monitor.txt")
+        with open(monitor_path, "wb") as monitor_file:
+            monitor_file.write(b'"SET" "long-line" "' + b"x" * 1024 + b'"')
+        with RESPCommandSink() as sink:
+            stats = self.run_against_sink(sink, "-t", "1", "-c", "1", "-n", "3",
+                                          "--monitor-input=" + monitor_path,
+                                          "--command=__monitor_line1__")
+            self.assertEqual(stats["Sets"]["Count"], 3)
+            self.assertEqual(sink.request_count, 3)
+
     def test_pipeline_reconnect(self):
         with RESPCommandSink() as sink:
             stats = self.run_against_sink(sink, "-t", "2", "-c", "2", "-n", "100",
