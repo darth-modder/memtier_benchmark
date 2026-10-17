@@ -723,6 +723,19 @@ is stalled or under a low `--rate-limiting` rate), and never exceeds it. See the
 [Real-Time Metrics Guide](docs/REALTIME_METRICS.md) for the full metric
 mapping, threat model, and operational notes.
 
+### Unix socket listen queues
+
+When a Unix socket listener's accept queue is full, memtier retries the pending
+connect every 10 ms without blocking the worker event loop. This also applies to
+TLS over Unix sockets. The existing `--connection-timeout` and
+`--connection-stage-timeout` limits still apply. Setting both limits to zero
+imposes no connection-specific time bound. Other connection errors retain the
+normal reconnect policy. Once any connection reaches steady state, with
+`--reconnect-on-error` and unlimited reconnect attempts, `--test-time` also ends
+a backlog wait at the run deadline, as it does for other unsuccessful connects.
+Before steady state, the connection and setup-stage limits bound startup. `--debug` logs the start of a backlog wait once
+per connect attempt.
+
 ### Linux abstract Unix sockets
 
 On Linux, `memtier_benchmark --unix-socket @NAME` connects to an abstract Unix
